@@ -473,24 +473,49 @@ class ReleaseBumpScript(Requirement):
 class ContribInviteServe(Requirement):
     """REQUIREMENT-ID: INVITE-SERVE-001
 
-    `contrib/tetron-invite-serve.sh [-r] NETWORK [PORT]` hands an invite to
-    a joiner on the LAN without a TUI or webui (USER 2026-11-05; serving from
-    tetron-tui itself is shelved). It needs only `tetron` and `python3`:
+    `contrib/tetron-invite-serve.py` hands an invite to a joiner on the LAN
+    without a TUI or webui (USER 2026-11-05, 2026-11-19). It is one python3
+    file, stdlib only, and needs `tetron` on PATH:
 
-    - creates one invite with `tetron invite NETWORK create --json` and
-      writes the bare `invite_key` and a newline to a file named
-      `invite.txt`, or with `-r` a random 6 character name from [a-z0-9],
-      mode 0600, in a new 0700 directory from `mktemp -d`, next to an empty
-      `index.html` so the directory is never listed. The URL must be short
-      enough to type; a long random path is no easier than typing the
-      invite itself (USER 2026-11-05);
-    - binds `python3 -m http.server` to the source address of the default
-      route only (`ip -4 route get`), on PORT (default 7979);
-    - prints the URL, for `tetron join` via curl or the tetron-tui join
-      field (TUI-JOIN-URL-001);
-    - serves until Ctrl+C or SIGTERM, then deletes the directory; the
-      invite is single use, so a later fetch is useless after the join;
-    - never prints the invite itself on a failure path; errors name the
-      failed step.
+    - usage: `tetron-invite-serve.py [NETWORK] [--port PORT]`. With no
+      NETWORK it uses the only network in `tetron status --json`; with
+      several it prints a numbered list and asks when stdin is a terminal,
+      otherwise it exits 2 asking for NETWORK; with none it exits 1;
+    - creates one invite with `tetron invite NETWORK create --json`. The
+      invite is held in memory, never written to disk. When stdin is not a
+      terminal and NETWORK was given together with `--invite-stdin`, the
+      invite is read from stdin instead (the TUI path, keeps it out of argv
+      and ps) and no invite is created;
+    - serves it at a path of 6 characters from a speakable lowercase base32
+      alphabet (`abcdefghjkmnpqrstvwxyz23456789`, no 0 o 1 l i u), chosen
+      with `secrets`, so the URL can be told aloud (USER 2026-11-19). The
+      path match is case-insensitive. Every other path answers 404; there is
+      no directory listing;
+    - binds to the source address of the default route only (`ip -4 route
+      get`), never to all interfaces, on PORT (default 7979), taking the
+      next free port when that one is in use;
+    - prints the URL as the first line of stdout and flushes it; all other
+      messages go to stderr;
+    - single use needs no one-shot logic: the invite is single use, so it
+      keeps serving after a fetch (USER 2026-11-19);
+    - stops after 5 wrong paths (lockout, USER 2026-11-19) and after 1 hour
+      without a request (idle timeout, USER 2026-11-19), and on Ctrl+C or
+      SIGTERM; it prints the reason to stderr; a lockout exits 3, a timeout or a
+      signal exits 0, so a caller can tell them apart;
+    - never prints the invite on a failure path; errors name the failed
+      step.
     """
     req_id = "INVITE-SERVE-001"
+
+
+class ContribInviteServeWrapper(Requirement):
+    """REQUIREMENT-ID: INVITE-SERVE-002
+
+    Depends on INVITE-SERVE-001. `contrib/tetron-invite-serve.sh` is the
+    easy entry for users (USER 2026-11-19): it checks that `python3` and
+    `tetron` are on PATH, naming the missing one, then runs `exec python3 -I
+    tetron-invite-serve.py "$@"` from its own directory, so
+    `./tetron-invite-serve.sh` with no arguments works. It contains no other
+    logic. The TUI starts the python file directly, not the wrapper.
+    """
+    req_id = "INVITE-SERVE-002"
