@@ -172,7 +172,6 @@ impl CoordinatorAcceptState {
     /// entry can accept the same secret until it restarts. This is not closed by
     /// INVITE-ATOMIC-001; a reject cache or invite reconvergence is a follow-up.
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     async fn redeem_invite_and_admit(
         &self,
         conn: Connection,
