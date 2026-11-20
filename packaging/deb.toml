@@ -16,6 +16,8 @@ section = "net"
 license = "MPL-2.0"
 homepage = "https://github.com/tetronos/tetron"
 depends = ["iproute2"]
+# PACKAGING-017: the invite share script needs python3; the daemon does not.
+recommends = ["python3"]
 smoke = "tetron --version"
 
 [[files]]
@@ -27,6 +29,17 @@ mode = "0755"
 src = "../contrib/tetron.packaged.service"
 dst = "usr/lib/systemd/system/tetron.service"
 mode = "0644"
+
+# PACKAGING-017: invite share script, for tetron-tui and the command line.
+[[files]]
+src = "../contrib/tetron-invite-serve.py"
+dst = "usr/share/tetron/tetron-invite-serve.py"
+mode = "0755"
+
+[[files]]
+src = "../contrib/tetron-invite-serve.py"
+dst = "usr/bin/tetron-invite-serve"
+mode = "0755"
 
 [scripts]
 postinst = "postinst"

@@ -386,6 +386,8 @@ class DebReleaseWiringGate(Constraint):
     PACKAGING-006 guard. `packaging/deb.toml` installs `/usr/bin/tetron`
     (0755) and the packaged unit at
     `/usr/lib/systemd/system/tetron.service` (0644), depends on `iproute2`,
+    installs the invite share script twice (PACKAGING-017, 0755) and
+    recommends `python3`,
     has no maintainer key, and has exactly a `postinst` and a `postrm`
     script. `postinst` uses `groupadd --system` and never `addgroup`,
     `systemctl start|enable|restart`. `postrm` (PACKAGING-013) never removes
