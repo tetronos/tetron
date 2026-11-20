@@ -220,7 +220,6 @@ impl MeshManager {
     /// node as its coordinator.
     #[tracing::instrument(skip(self, hostname), fields(mode = ?mode))]
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     pub async fn create_network(
         self: &Arc<Self>,
         mode: GroupMode,
@@ -663,7 +662,6 @@ impl MeshManager {
     /// (optionally with an invite secret).
     #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(skip(self, hostname), fields(net = alias.unwrap_or(network_key)))]
-    #[allow(clippy::too_many_arguments)]
     pub async fn join_network(
         self: &Arc<Self>,
         network_key: &str,
@@ -1632,7 +1630,6 @@ impl MeshManager {
     /// **MULTISEG-002:** `ctx` is `network_name`'s own [`MeshCtx`] — dialed
     /// peers register into that network's own `peers` table and forward into
     /// its own `tun_tx`, not a daemon-wide one.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn dial_all_members(
         &self,
         members: &[Member],
