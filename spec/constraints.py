@@ -409,7 +409,9 @@ class SuiteInstallerShellTestsGate(Constraint):
     and `install-suite-method.test.sh` (decision tables for
     `confirm_sudo_install` and `--method`), `install-suite-method-flow.test.sh`
     (stubbed end-to-end flow for `--method`, PACKAGING-007), and
-    `install-suite-shadow.test.sh` (PACKAGING-008). They run the shipped
+    `install-suite-shadow.test.sh` (PACKAGING-008), and
+    `invite-serve.test.sh` (INVITE-SERVE-001, INVITE-SERVE-002, stub `tetron`
+    on PATH). They run the shipped
     script, extract its functions at run time, and never touch the host. The
     list is explicit, not a glob: `install-suite-sandbox.test.sh` needs Docker
     and pulls an image, so it is run by hand and is not part of this gate.
