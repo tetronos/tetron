@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.15.5] - 2026-11-19
+
 ### Added
 
 - `contrib/tetron-invite-serve.py` hands an invite to a joiner on the LAN (INVITE-SERVE-001): a 6 character speakable URL path, lockout after 5 wrong paths, 1 hour idle timeout, bound to the default-route address, port 7979 with fallback, the only network by default (numbered list if several), and `--invite-stdin` for tetron-tui. `contrib/tetron-invite-serve.sh` is the easy entry (INVITE-SERVE-002).
