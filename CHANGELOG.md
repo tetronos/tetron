@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `contrib/tetron-invite-serve.py` hands an invite to a joiner on the LAN (INVITE-SERVE-001): a 6 character speakable URL path, lockout after 5 wrong paths, 1 hour idle timeout, bound to the default-route address, port 7979 with fallback, the only network by default (numbered list if several), and `--invite-stdin` for tetron-tui. `contrib/tetron-invite-serve.sh` is the easy entry (INVITE-SERVE-002).
+- The deb installs the script as `/usr/share/tetron/tetron-invite-serve.py` and `/usr/bin/tetron-invite-serve` and Recommends python3 (PACKAGING-017).
+
+### Security
+
+- hickory-net, hickory-proto and hickory-resolver 0.26.1 to 0.26.3 (23 RUSTSEC advisories); `cargo audit` reports 0 vulnerabilities.
+
+### Changed
+
+- The invite script is one python3 file; the sh version with `invite.txt` and `-r` is replaced by the wrapper.
+- Removed four duplicated `#[allow(clippy::too_many_arguments)]` attributes (clippy 1.100).
+
 ## [0.15.4] - 2026-11-06
 
 ### Changed
