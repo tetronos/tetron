@@ -510,6 +510,7 @@ def check_suite_shell_tests() -> dict:
         "install-suite-method.test.sh",
         "install-suite-method-flow.test.sh",
         "install-suite-shadow.test.sh",
+        "invite-serve.test.sh",
     ]
     failures = []
     output = {}
