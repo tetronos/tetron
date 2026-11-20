@@ -468,6 +468,11 @@ def check_deb_release() -> dict:
         problems.append("packaged unit 0644 missing")
     if not any(x.split()[0] == "iproute2" for x in d.get("depends", [])):
         problems.append("iproute2 not in depends")
+    for dst in ("usr/share/tetron/tetron-invite-serve.py", "usr/bin/tetron-invite-serve"):
+        if files.get(dst) != "0755":
+            problems.append(f"{dst} 0755 missing (PACKAGING-017)")
+    if "python3" not in d.get("recommends", []):
+        problems.append("python3 not in recommends (PACKAGING-017)")
     if "maintainer" in d:
         problems.append("maintainer must not be hardcoded")
     if set(d.get("scripts", {})) != {"postinst", "postrm"}:

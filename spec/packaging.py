@@ -519,3 +519,17 @@ class ContribInviteServeWrapper(Requirement):
     logic. The TUI starts the python file directly, not the wrapper.
     """
     req_id = "INVITE-SERVE-002"
+
+
+class DebShipsInviteServe(Requirement):
+    """REQUIREMENT-ID: PACKAGING-017
+
+    Depends on PACKAGING-006 and INVITE-SERVE-001. The deb ships the invite
+    share script so tetron-tui (TUI-SERVE-001) and the command line find it
+    (USER 2026-11-19): `contrib/tetron-invite-serve.py` is installed twice,
+    both mode 0755, as `/usr/share/tetron/tetron-invite-serve.py` (where
+    tetron-tui looks) and as the command `/usr/bin/tetron-invite-serve`.
+    `packaging/deb.toml` Recommends `python3` (the script needs it; the
+    daemon does not, so it is not a Depends).
+    """
+    req_id = "PACKAGING-017"
