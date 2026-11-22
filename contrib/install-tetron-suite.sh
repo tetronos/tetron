@@ -43,6 +43,10 @@
 #   5. Checks that the copy it installed is the one that runs: the first
 #      copy on PATH and, for core, the binary its service starts. If another
 #      copy runs instead, the component is reported as failed.
+#   tui also needs tetron-invite-serve.py (the invite share on the LAN). It is
+#   a plain script, fetched like backup and placed at
+#   /usr/share/tetron/tetron-invite-serve.py, where the tui looks for it. A
+#   copy owned by a package is left alone; python3 must be installed to use it.
 #   backup is a plain script rather than a release: it is fetched from the
 #   tetron repository's main branch, with no checksum file, and copied to
 #   /usr/local/bin. If it is already there it is left alone; delete it to
@@ -1001,6 +1005,38 @@ install_backup() {
 	warn_if_shadowed "$comp" "$dest"
 }
 
+# The tui shares an invite on the LAN by running tetron-invite-serve.py
+# (TUI-SERVE-001), a plain script from the tetron repository's main branch. The
+# tui release binary does not contain it, so it is fetched next to the tui and
+# placed where the tui looks: /usr/share/tetron. A copy owned by a package (the
+# deb ships it) is left alone. An older raw copy is replaced when it differs.
+INVITE_SERVE_DEST="${TETRON_SUITE_INVITE_SERVE_DEST:-/usr/share/tetron/tetron-invite-serve.py}"
+install_invite_serve() {
+	local url tmpdir
+	url="https://raw.githubusercontent.com/tetronos/tetron/main/contrib/tetron-invite-serve.py"
+	if [ -e "$INVITE_SERVE_DEST" ] && [ "$(component_origin "$INVITE_SERVE_DEST")" != binary ]; then
+		log_pass "tui: invite share script owned by a package, left alone ($INVITE_SERVE_DEST)"
+		return 0
+	fi
+	tmpdir="$WORKDIR/invite-serve"
+	mkdir -p "$tmpdir"
+	log_info "tui: downloading $url ..."
+	curl -fsSL -o "$tmpdir/tetron-invite-serve.py" "$url" \
+		|| { log_error "tui: failed to download tetron-invite-serve.py"; return 1; }
+	head -1 "$tmpdir/tetron-invite-serve.py" | grep -q '^#!' \
+		|| { log_error "tui: tetron-invite-serve.py is not a script"; return 1; }
+	if [ -f "$INVITE_SERVE_DEST" ] && cmp -s "$tmpdir/tetron-invite-serve.py" "$INVITE_SERVE_DEST"; then
+		log_pass "tui: invite share script up to date ($INVITE_SERVE_DEST)"
+		return 0
+	fi
+	$SUDO mkdir -p "$(dirname "$INVITE_SERVE_DEST")"
+	$SUDO install -m 0755 "$tmpdir/tetron-invite-serve.py" "$INVITE_SERVE_DEST" \
+		|| { log_error "tui: failed to install the invite share script to $INVITE_SERVE_DEST"; return 1; }
+	log_pass "tui: invite share script installed ($INVITE_SERVE_DEST)"
+	command -v python3 >/dev/null 2>&1 \
+		|| log_warn "tui: python3 is not installed; the invite share needs it"
+}
+
 any_failed=0
 # Components that failed. One failure does not stop the others; all are
 # listed in the closing summary and the script exits 1.
@@ -1163,6 +1199,19 @@ for comp in "${COMPONENTS[@]}"; do
 		install_component "$comp" "$dest" "$asset" "$tag" || failed="$failed $comp"
 	fi
 done
+
+# tui: the invite share script goes with it (see install_invite_serve).
+if in_list tui "${COMPONENTS[*]}" && ! in_list tui "$failed $skipped"; then
+	if [ "$CHECK_ONLY" -eq 1 ]; then
+		if [ -f "$INVITE_SERVE_DEST" ]; then
+			log_pass "tui: invite share script installed ($INVITE_SERVE_DEST)"
+		else
+			log_warn "tui: invite share script missing ($INVITE_SERVE_DEST); run without --check to install it"
+		fi
+	else
+		install_invite_serve || failed="$failed tui"
+	fi
+fi
 
 # Report anything you declined. A declined core upgrade gets its own warning,
 # because add-ons newer than the core daemon may not work with it.
