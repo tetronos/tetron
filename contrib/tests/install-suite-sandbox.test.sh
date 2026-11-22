@@ -55,6 +55,7 @@ https://github.com/*/releases/*)
 	[ -e "/fix/fail/$asset" ] && exit 22
 	cat "/fix/release/$asset" > "$out" || exit 22 ;;
 */contrib/install-tetron-suite.sh) cat /fix/script > "$out" ;;
+*/contrib/tetron-invite-serve.py) printf '#!/usr/bin/env python3\nprint(1)\n' > "$out" ;;
 */contrib/tetron-backup.sh) printf '#!/bin/sh\necho backup\n' > "$out" ;;
 *) exit 22 ;;
 esac
@@ -122,6 +123,15 @@ check "  says sudo is needed" has "sudo"
 check "  before downloading anything" log_lacks curl.log /releases/download/
 run --user 1000:1000 -e HOME=/tmp -- 'bash /fix/script --check'
 check "--check still works without sudo" rc_is 0
+
+echo "tui brings the invite share script"
+run -- 'bash /fix/script --no-core --install-tui; ls -l /usr/share/tetron/tetron-invite-serve.py'
+check "script placed where the tui looks, mode 0755" has "^-rwxr-xr-x.*/usr/share/tetron/tetron-invite-serve.py"
+check "  fetched from the tetron main branch" log_has curl.log "tetronos/tetron/main/contrib/tetron-invite-serve.py"
+run -- 'bash /fix/script --no-core --install-tui >/dev/null; bash /fix/script --no-core --install-tui'
+check "second run finds it up to date" has "invite share script up to date"
+run -- 'bash /fix/script --no-core --check'
+check "--check fetches no script" log_lacks curl.log tetron-invite-serve.py
 
 echo "one component fails"
 run -- 'touch /fix/fail/tetron-webui-linux-x86_64; bash /fix/script --install-webui --install-tui; echo "rc=$?"; ls /usr/local/bin'
