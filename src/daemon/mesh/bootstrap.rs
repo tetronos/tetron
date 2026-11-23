@@ -412,6 +412,17 @@ fn truncate_decode_error(s: &str) -> String {
     format!("{}... (truncated)", &s[..end])
 }
 
+/// PROTO-WIRE-001: the reply text for a request this daemon cannot decode:
+/// names this daemon's version and protocol epoch so the client can tell
+/// which side to upgrade, then the decode error. Bounded as a whole.
+fn undecodable_request_message(err: &str) -> String {
+    truncate_decode_error(&format!(
+        "request not supported by this daemon (tetron {}, protocol {}): {err}",
+        env!("CARGO_PKG_VERSION"),
+        tetron_proto::PROTOCOL_EPOCH,
+    ))
+}
+
 /// IPC-DECODE-ERR-001: a request this build cannot decode (a settings key it
 /// does not know, a variant from a newer `tetron`, or a malformed frame) gets
 /// the reason back — bounded, see `truncate_decode_error` — instead of a bare
@@ -434,7 +445,7 @@ async fn handle_ipc_client(stream: UnixStream, daemon: &Arc<MeshManager>) -> Res
         }
         Err(e) => {
             tracing::debug!(error = %e, "undecodable IPC request");
-            let message = truncate_decode_error(&format!("{e:#}"));
+            let message = undecodable_request_message(&format!("{e:#}"));
             let _ = send_reply_bounded(
                 &mut framed,
                 IpcMessage::Error { message },
@@ -791,6 +802,28 @@ mod tests {
         assert!(out.len() < MAX_DECODE_ERROR_LEN + 32, "{}", out.len());
         assert!(out.ends_with("... (truncated)"), "{out}");
         assert!(out.starts_with("unknown IPC variant: AAA"), "{out}");
+    }
+
+    // PROTO-WIRE-001
+    #[test]
+    fn undecodable_request_reply_names_version_and_protocol() {
+        let out = undecodable_request_message("decode IPC message: unknown variant `Frob`");
+        let want = format!(
+            "request not supported by this daemon (tetron {}, protocol {}): decode IPC message: unknown variant `Frob`",
+            env!("CARGO_PKG_VERSION"),
+            tetron_proto::PROTOCOL_EPOCH,
+        );
+        assert_eq!(out, want);
+    }
+
+    #[test]
+    fn undecodable_request_reply_stays_bounded() {
+        let out = undecodable_request_message(&"A".repeat(900_000));
+        assert!(out.len() < MAX_DECODE_ERROR_LEN + 32, "{}", out.len());
+        assert!(
+            out.starts_with("request not supported by this daemon"),
+            "{out}"
+        );
     }
 
     #[test]
