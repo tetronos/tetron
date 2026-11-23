@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `tetron_proto::PROTOCOL_EPOCH`, the wire protocol generation (`MAJOR.MINOR` before 1.0) (PROTO-EPOCH-001). `StatusResponse` carries `protocol_epoch` (PROTO-EPOCH-002). `tetron_proto::ipc::epoch_check` and `EpochCheck::warning` give every client the same mismatch check, a warning, never a refusal (PROTO-EPOCH-003). `tetron status --json` reports `protocol_epoch`, and `tetron status` warns on stderr when the daemon speaks another epoch (PROTO-EPOCH-004).
+- Wire fixtures written by v0.15.5 and a test that every previous-release frame still decodes; `contrib/proto-fixtures/gen.sh <tag>` makes the set at each release (PROTO-WIRE-002). `reconcile.py` checks CON-PROTO01: no `deny_unknown_fields`, no positional msgpack encoding in tetron-proto.
+- The release workflow notifies every suite client in `contrib/suite-clients.txt` of a new tag (`repository_dispatch` `tetron-release`, secret `SUITE_DISPATCH_TOKEN`); each client opens its own bump PR (PROTO-REL-001).
+
+### Changed
+
+- A request the daemon cannot decode is answered with `request not supported by this daemon (tetron VERSION, protocol EPOCH): ...` (PROTO-WIRE-001).
+
+### Security
+
+- url 2.5.8 to 2.5.9 (RUSTSEC-2026-0592).
+
 ## [0.15.5] - 2026-11-19
 
 ### Added
