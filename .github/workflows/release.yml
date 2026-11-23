@@ -80,6 +80,37 @@ jobs:
           draft: false
           prerelease: ${{ contains(steps.extract_version.outputs.tag, '-') }}
 
+  # PROTO-REL-001: tell every suite client (contrib/suite-clients.txt) about the
+  # new tag; each one opens its own bump PR (bump-proto.yml). Uses the tetronos
+  # bot token in SUITE_DISPATCH_TOKEN. A missing secret or a failed dispatch is
+  # reported and does not fail the release: the release is already out and a
+  # client can be bumped by hand with its contrib/bump-proto.sh.
+  dispatch-suite:
+    needs: create-release
+    runs-on: ubuntu-22.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dispatch tetron-release to suite clients
+        env:
+          TOKEN: ${{ secrets.SUITE_DISPATCH_TOKEN }}
+          TAG: ${{ needs.create-release.outputs.tag }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::warning::SUITE_DISPATCH_TOKEN not set; suite clients not notified of $TAG"
+            exit 0
+          fi
+          failed=0
+          for repo in $(grep -E '^tetronos/[A-Za-z0-9._-]+$' contrib/suite-clients.txt); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+              -H "Authorization: Bearer $TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$repo/dispatches" \
+              -d "{\"event_type\":\"tetron-release\",\"client_payload\":{\"tag\":\"$TAG\"}}")
+            if [ "$code" = 204 ]; then echo "$repo: notified ($TAG)"; else echo "::warning::$repo: dispatch failed (HTTP $code)"; failed=1; fi
+          done
+          [ "$failed" = 0 ] || echo "::warning::some suite clients were not notified; bump them with contrib/bump-proto.sh"
+
   build:
     needs: create-release
     permissions:
