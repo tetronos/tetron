@@ -377,6 +377,21 @@ def check_live_approval_absence() -> dict:
     return {"unexpected_count": unexpected}
 
 
+def check_proto_wire_rules() -> dict:
+    """CON-PROTO01: in tetron-proto/src, no `deny_unknown_fields` and no positional
+    `rmp_serde::to_vec(` outside test code. Test code is everything from a file's
+    first `#[cfg(test)]` line on (the crate keeps its test modules last)."""
+    hits = []
+    for p in sorted(Path("tetron-proto/src").rglob("*.rs")):
+        lines = p.read_text().splitlines()
+        for n, line in enumerate(lines, 1):
+            if line.strip() == "#[cfg(test)]":
+                break
+            if "deny_unknown_fields" in line or "rmp_serde::to_vec(" in line:
+                hits.append(f"{p}:{n}")
+    return {"violations": len(hits), "hits": hits}
+
+
 def check_non_reentrant_libc() -> dict:
     """CON-THR01: no non-reentrant libc lookups (static return storage) in the
     multi-threaded code; the `_r` variants are allowed."""
@@ -582,6 +597,7 @@ if __name__ == "__main__":
         "product_identity": check_product_identity(),
         "live_approval_absence": check_live_approval_absence(),
         "non_reentrant_libc": check_non_reentrant_libc(),
+        "proto_wire_rules": check_proto_wire_rules(),
         "cargo_audit": check_cargo_audit(),
         "deb_release": check_deb_release(),
         "suite_shell_tests": check_suite_shell_tests(),
@@ -609,6 +625,7 @@ if __name__ == "__main__":
         and ctx["product_identity"]["config_dir"] == "/etc/tetron"
         and ctx["live_approval_absence"]["unexpected_count"] == 0
         and ctx["non_reentrant_libc"]["unexpected_count"] == 0
+        and ctx["proto_wire_rules"]["violations"] == 0
         and ctx["cargo_audit"]["installed"]
         and ctx["cargo_audit"]["count"] == 0
         and ctx["deb_release"]["valid"]
