@@ -589,6 +589,68 @@ impl<T: DeserializeOwned> Decoder for MsgpackCodec<T> {
     }
 }
 
+/// PROTO-EPOCH-003: how the daemon's wire protocol relates to this build's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EpochCheck {
+    /// Same epoch: the two sides understand each other.
+    Match,
+    /// Different epochs: requests or replies one side added may not decode.
+    Mismatch { daemon: String, client: String },
+    /// The daemon reported neither an epoch nor a parsable version.
+    Unknown,
+}
+
+impl EpochCheck {
+    /// One warning line for a mismatch, naming the side to upgrade; `None`
+    /// otherwise. A mismatch is a warning, never a refusal (USER R5).
+    pub fn warning(&self) -> Option<String> {
+        let EpochCheck::Mismatch { daemon, client } = self else {
+            return None;
+        };
+        let older = if epoch_newer(daemon, client) {
+            "this client"
+        } else {
+            "the tetron daemon"
+        };
+        Some(format!(
+            "tetron daemon speaks protocol {daemon}, this client {client}: upgrade {older}"
+        ))
+    }
+}
+
+/// `MAJOR.MINOR` of a version string such as `0.15.5`, or `None`.
+fn epoch_of_version(version: &str) -> Option<String> {
+    let mut parts = version.trim().split('.');
+    let (major, minor) = (parts.next()?, parts.next()?);
+    let numeric = |p: &str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit());
+    (numeric(major) && numeric(minor)).then(|| format!("{major}.{minor}"))
+}
+
+/// Whether epoch `a` is newer than `b`, compared numerically part by part.
+fn epoch_newer(a: &str, b: &str) -> bool {
+    let parse = |e: &str| -> Vec<u64> { e.split('.').filter_map(|p| p.parse().ok()).collect() };
+    parse(a) > parse(b)
+}
+
+/// PROTO-EPOCH-003: compare the daemon's epoch (from a `StatusResponse`) with
+/// this build's [`crate::PROTOCOL_EPOCH`]. An empty `protocol_epoch` (older
+/// daemon) is derived from `daemon_version`.
+pub fn epoch_check(protocol_epoch: &str, daemon_version: &str) -> EpochCheck {
+    let daemon = if protocol_epoch.is_empty() {
+        epoch_of_version(daemon_version)
+    } else {
+        epoch_of_version(&format!("{protocol_epoch}.0"))
+    };
+    match daemon {
+        None => EpochCheck::Unknown,
+        Some(d) if d == crate::PROTOCOL_EPOCH => EpochCheck::Match,
+        Some(d) => EpochCheck::Mismatch {
+            daemon: d,
+            client: crate::PROTOCOL_EPOCH.to_string(),
+        },
+    }
+}
+
 pub type IpcFramed = Framed<UnixStream, MsgpackCodec<IpcMessage>>;
 
 /// `TETRON_SOCKET_PATH` overrides the resolved path on every platform
@@ -1072,5 +1134,67 @@ mod tests {
         };
         assert_eq!(protocol_epoch, "");
         assert_eq!(daemon_version, "0.15.4");
+    }
+
+    // PROTO-EPOCH-003
+
+    #[test]
+    fn epoch_check_match_and_mismatch() {
+        let me = crate::PROTOCOL_EPOCH;
+        assert_eq!(epoch_check(me, ""), EpochCheck::Match);
+        assert_eq!(epoch_check(me, "9.9.9"), EpochCheck::Match);
+        assert_eq!(
+            epoch_check("99.0", ""),
+            EpochCheck::Mismatch {
+                daemon: "99.0".into(),
+                client: me.into()
+            }
+        );
+    }
+
+    #[test]
+    fn epoch_check_falls_back_to_daemon_version() {
+        let me = crate::PROTOCOL_EPOCH;
+        assert_eq!(epoch_check("", &format!("{me}.7")), EpochCheck::Match);
+        assert_eq!(
+            epoch_check("", "0.1.0"),
+            EpochCheck::Mismatch {
+                daemon: "0.1".into(),
+                client: me.into()
+            }
+        );
+    }
+
+    #[test]
+    fn epoch_check_unknown_when_nothing_parses() {
+        assert_eq!(epoch_check("", ""), EpochCheck::Unknown);
+        assert_eq!(epoch_check("", "garbage"), EpochCheck::Unknown);
+        assert_eq!(epoch_check("x.y", ""), EpochCheck::Unknown);
+    }
+
+    #[test]
+    fn epoch_warning_names_the_older_side() {
+        let me = crate::PROTOCOL_EPOCH;
+        let newer = EpochCheck::Mismatch {
+            daemon: "99.0".into(),
+            client: me.into(),
+        };
+        let w = newer.warning().unwrap();
+        assert!(
+            w.contains("protocol 99.0") && w.ends_with("upgrade this client"),
+            "{w}"
+        );
+        let older = EpochCheck::Mismatch {
+            daemon: "0.1".into(),
+            client: me.into(),
+        };
+        assert!(
+            older
+                .warning()
+                .unwrap()
+                .ends_with("upgrade the tetron daemon")
+        );
+        assert_eq!(EpochCheck::Match.warning(), None);
+        assert_eq!(EpochCheck::Unknown.warning(), None);
     }
 }
