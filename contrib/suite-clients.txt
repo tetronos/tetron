@@ -8,4 +8,4 @@ tetronos/tetron-webui
 tetronos/tetron-systray
 tetronos/tetron-messageboard
 tetronos/tetron-sync-receiver
-tetronos/tetron-hosts
+# tetronos/tetron-hosts: unfinished, not released; add it here when it is.
