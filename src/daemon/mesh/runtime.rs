@@ -1049,8 +1049,10 @@ impl MeshManager {
                         )
                         .await
                     {
-                        Ok(TryJoin::Joined(IpcMessage::Joined { network, my_ip, .. })) => {
-                            tracing::info!(network = %network, ip = %my_ip, "restored member network");
+                        Ok(TryJoin::Joined(resp)) => {
+                            if let IpcMessage::Joined { network, my_ip, .. } = *resp {
+                                tracing::info!(network = %network, ip = %my_ip, "restored member network");
+                            }
                         }
                         Ok(_) => {}
                         Err(e) => {

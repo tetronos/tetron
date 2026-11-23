@@ -158,6 +158,7 @@ impl MeshManager {
             endpoint_id: self.endpoint.id(),
             active,
             daemon_version: env!("CARGO_PKG_VERSION").to_string(),
+            protocol_epoch: tetron_proto::PROTOCOL_EPOCH.to_string(),
             networks: statuses,
             packets_rx: self.stats.packets_rx.get(),
             packets_tx: self.stats.packets_tx.get(),

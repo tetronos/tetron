@@ -207,6 +207,11 @@ pub enum IpcMessage {
         /// predating this field.
         #[serde(default)]
         daemon_version: String,
+        /// PROTO-EPOCH-002: the daemon's [`crate::PROTOCOL_EPOCH`]. Empty from a
+        /// daemon predating this field; [`epoch_check`] then falls back to
+        /// `daemon_version`.
+        #[serde(default)]
+        protocol_epoch: String,
         networks: Vec<NetworkStatus>,
         packets_rx: u64,
         packets_tx: u64,
@@ -829,6 +834,7 @@ mod tests {
             endpoint_id: ep_id,
             active: true,
             daemon_version: "0.1.0".to_string(),
+            protocol_epoch: "0.1".to_string(),
             networks: vec![NetworkStatus {
                 network: "gaming".to_string(),
                 role: NetworkRole::Coordinator,
@@ -1025,5 +1031,46 @@ mod tests {
         assert_eq!(decoded.black_holes_detected, None);
         assert_eq!(decoded.sent_plpmtud_probes, None);
         assert_eq!(decoded.lost_plpmtud_probes, None);
+    }
+
+    // PROTO-EPOCH-002
+
+    #[test]
+    fn status_response_without_protocol_epoch_decodes_empty() {
+        #[derive(Serialize)]
+        enum Old {
+            StatusResponse {
+                endpoint_id: EndpointId,
+                active: bool,
+                daemon_version: String,
+                networks: Vec<NetworkStatus>,
+                packets_rx: u64,
+                packets_tx: u64,
+                bytes_rx: u64,
+                bytes_tx: u64,
+            },
+        }
+        let id = iroh::SecretKey::generate().public();
+        let old = Old::StatusResponse {
+            endpoint_id: id,
+            active: true,
+            daemon_version: "0.15.4".into(),
+            networks: vec![],
+            packets_rx: 0,
+            packets_tx: 0,
+            bytes_rx: 0,
+            bytes_tx: 0,
+        };
+        let bytes = rmp_serde::to_vec_named(&old).unwrap();
+        let IpcMessage::StatusResponse {
+            protocol_epoch,
+            daemon_version,
+            ..
+        } = rmp_serde::from_slice(&bytes).unwrap()
+        else {
+            panic!("not a StatusResponse");
+        };
+        assert_eq!(protocol_epoch, "");
+        assert_eq!(daemon_version, "0.15.4");
     }
 }

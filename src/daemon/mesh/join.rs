@@ -61,7 +61,9 @@ pub(crate) enum JoinResult {
 
 /// Outcome of one `join_network_inner` attempt.
 pub(crate) enum TryJoin {
-    Joined(IpcMessage),
+    /// Boxed: `IpcMessage` is large (its biggest variant, `StatusResponse`,
+    /// grew with PROTO-EPOCH-002) and `Pending` is empty.
+    Joined(Box<IpcMessage>),
     Pending,
 }
 
