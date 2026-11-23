@@ -683,7 +683,7 @@ impl MeshManager {
             )
             .await
         {
-            Ok(TryJoin::Joined(resp)) => resp,
+            Ok(TryJoin::Joined(resp)) => *resp,
             Ok(TryJoin::Pending) => {
                 // The coordinator queued us for live approval — this is a
                 // full-tetron or legacy peer that still runs live admission.
@@ -1504,7 +1504,7 @@ impl MeshManager {
         self.create_and_attach_network_tun(display_name, my_ip, network_subnet)
             .await;
 
-        Ok(TryJoin::Joined(IpcMessage::Joined {
+        Ok(TryJoin::Joined(Box::new(IpcMessage::Joined {
             network: display_name.to_string(),
             my_ip,
             my_ipv6: Some(derive_ipv6(&self.identity.local_identity(), &net_pubkey)),
@@ -1512,7 +1512,7 @@ impl MeshManager {
             // subnet, right above — see the identical note in
             // `create_network_inner`'s `Created` response.
             warning: None,
-        }))
+        })))
     }
 
     /// Fetch the authoritative GroupBlob for a network we coordinate, used to
