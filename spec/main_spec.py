@@ -7,7 +7,7 @@ requirement/constraint classes defined in the domain modules it imports below
 '''
 
 from libspec import Spec
-from . import addressing, branding, cli, constraints, core, membership, packaging, security
+from . import addressing, branding, cli, constraints, core, membership, packaging, protocol, security
 
 
 class ForkSpec(Spec):
@@ -21,6 +21,7 @@ class ForkSpec(Spec):
         cli,
         security,
         packaging,
+        protocol,
         constraints,
     ]
 
