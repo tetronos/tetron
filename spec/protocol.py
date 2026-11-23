@@ -102,14 +102,15 @@ class UndecodableRequestNamesProtocol(Requirement):
     Extends IPC-DECODE-ERR-001. The `IpcMessage::Error` the daemon sends for a
     request it cannot decode (most often a variant from a newer client)
     starts with `request not supported by this daemon (tetron VERSION,
-    protocol EPOCH): ` followed by the decode error. The whole message stays
-    within `MAX_DECODE_ERROR_LEN` (the prefix counts). The client sees why,
+    protocol EPOCH): ` followed by the decode error. The whole message,
+    prefix included, goes through IPC-DECODE-ERR-001's
+    `truncate_decode_error` bound. The client sees why,
     and which side to upgrade, instead of a bare decode error.
 
     Depends on: PROTO-EPOCH-001.
 
-    Tests: the formatter prefixes and still bounds the length; a frame with
-    an unknown variant gets the prefixed reply.
+    Tests: the formatter produces the prefix with this build's version and
+    epoch; a 900 kB error is still bounded.
     """
     req_id = "PROTO-WIRE-001"
 
