@@ -177,6 +177,7 @@ pub(crate) async fn ipc_status() -> Result<()> {
             endpoint_id,
             active,
             daemon_version,
+            protocol_epoch,
             networks,
             packets_rx,
             packets_tx,
@@ -192,6 +193,7 @@ pub(crate) async fn ipc_status() -> Result<()> {
                     "endpoint": endpoint_id.to_string(),
                     "active": active,
                     "daemon_version": daemon_version,
+                    "protocol_epoch": protocol_epoch,
                     "networks": networks,
                     "traffic": {
                         "packets_rx": packets_rx, "packets_tx": packets_tx,
@@ -288,6 +290,11 @@ pub(crate) async fn ipc_status() -> Result<()> {
                     daemon_version, cli_version,
                 );
                 println!("  (run `sudo tetron restart` to restart the daemon onto the new binary)");
+            }
+            // PROTO-EPOCH-004: a different wire protocol generation is a
+            // warning, never a refusal (USER R5).
+            if let Some(w) = ipc::epoch_check(&protocol_epoch, &daemon_version).warning() {
+                eprintln!("  ! {w}");
             }
             println!();
         }
