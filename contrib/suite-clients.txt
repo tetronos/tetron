@@ -1,0 +1,11 @@
+# PROTO-REL-001: repositories that depend on tetron-proto. On every tetron
+# release tag, release.yml sends each one a repository_dispatch
+# `tetron-release` with the tag; the repo's own bump-proto.yml opens a PR.
+# One tetronos/<repo> per line.
+tetronos/tetron-tui
+tetronos/tetron-wm
+tetronos/tetron-webui
+tetronos/tetron-systray
+tetronos/tetron-messageboard
+tetronos/tetron-sync-receiver
+tetronos/tetron-hosts
