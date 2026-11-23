@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.15.6] - 2026-11-23
+
 ### Added
 
 - `tetron_proto::PROTOCOL_EPOCH`, the wire protocol generation (`MAJOR.MINOR` before 1.0) (PROTO-EPOCH-001). `StatusResponse` carries `protocol_epoch` (PROTO-EPOCH-002). `tetron_proto::ipc::epoch_check` and `EpochCheck::warning` give every client the same mismatch check, a warning, never a refusal (PROTO-EPOCH-003). `tetron status --json` reports `protocol_epoch`, and `tetron status` warns on stderr when the daemon speaks another epoch (PROTO-EPOCH-004).
