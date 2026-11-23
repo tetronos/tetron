@@ -1,0 +1,15 @@
+# PROTO-WIRE-002 fixture generator. Built by gen.sh against the tetron-proto
+# source of a release tag (path written by gen.sh into .cargo/config-free
+# Cargo.toml patch below); not a workspace member.
+[package]
+name = "proto-fixtures"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+tetron-proto = { path = "PROTO_PATH" }
+rmp-serde = "1"
+iroh = "1"
