@@ -24,6 +24,5 @@ ignore = [
     # Checked 2026-09-11 against veilid-core/veilid-tools 0.5.7 (latest on
     # crates.io at the time). Revisit if veilid-core bumps hickory-resolver,
     # or before VEILID-002 wires this crate into the `tetron` package proper.
-    "RUSTSEC-2026-0118",
     "RUSTSEC-2026-0119",
 ]
