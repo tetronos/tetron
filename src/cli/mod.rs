@@ -11,6 +11,7 @@
 //! aliases in the crate root.
 
 mod admin;
+mod exe_path;
 mod invite;
 mod network;
 mod service;
