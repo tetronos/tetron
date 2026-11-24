@@ -533,3 +533,42 @@ class DebShipsInviteServe(Requirement):
     daemon does not, so it is not a Depends).
     """
     req_id = "PACKAGING-017"
+
+
+class StableServiceExecPath(Requirement):
+    """REQUIREMENT-ID: PACKAGING-018
+
+    Depends on PACKAGING-007. The path `tetron install` writes as the
+    service's ExecStart (systemd) or program (launchd) is a stable path to
+    tetron, chosen in this order:
+    1. `$TETRON_EXE` when it is an absolute path to an executable file;
+    2. when the running binary, symlinks resolved, is under `/nix/store/`
+       (installed by Nix): argv[0] when it is absolute, outside
+       `/nix/store/` and resolves into it (a profile link such as
+       `~/.nix-profile/bin/tetron`, passed by `sudo $(command -v tetron)
+       install`, since sudo's secure_path drops the profile from PATH);
+       else the first `tetron` on PATH that is outside `/nix/store/` and
+       resolves into it;
+    3. else the running binary as today, with the " (deleted)" suffix
+       stripped. A Nix wrapper's inner binary (`.tetron-wrapped`, which lacks
+       the wrapper's PATH to iproute2) is never written: its sibling `tetron`
+       is used instead.
+    When step 3 writes a `/nix/store/` path, `tetron install` warns that the
+    unit breaks after a Nix upgrade and garbage collection, and how to fix
+    it (`TETRON_EXE`, or run it again after upgrading). The same rule as
+    tetron-wm WMNIX-003.
+    """
+    req_id = "PACKAGING-018"
+
+
+class InstallOnNixOS(Requirement):
+    """REQUIREMENT-ID: PACKAGING-019
+
+    On NixOS (`/etc/NIXOS` exists) the service is declared in the system
+    configuration (tetron-nixos `services.tetron`) and `/etc/systemd/system`
+    is read-only: `tetron install` writes nothing, prints that the daemon is
+    set up with `services.tetron.enable = true;` (module from
+    github:tetronos/tetron-nixos), and exits non-zero. `tetron uninstall`
+    says the same. Other commands are unchanged.
+    """
+    req_id = "PACKAGING-019"
