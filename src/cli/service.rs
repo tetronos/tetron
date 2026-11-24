@@ -340,11 +340,24 @@ fn vendor_unit_exists() -> bool {
 /// every `tetron install`, keeping the exec path fresh if the binary moves.
 #[allow(unused_variables)]
 pub(crate) fn ensure_service_installed(overrides: &PathOverrides) -> Result<()> {
-    let exe = std::env::current_exe()
+    let running = std::env::current_exe()
         .context("failed to determine current executable path")?
         .to_string_lossy()
         .into_owned();
-    let exe = strip_deleted_suffix(&exe).to_owned();
+    let running = strip_deleted_suffix(&running).to_owned();
+    // PACKAGING-018: the path written into the unit survives a Nix upgrade.
+    let argv0 = std::env::args_os().next();
+    let (exe_path, source) = super::exe_path::stable_exec_path(
+        std::env::var_os("TETRON_EXE").as_deref(),
+        argv0.as_deref(),
+        Path::new(&running),
+        std::env::var_os("PATH").as_deref(),
+        Path::new(super::exe_path::NIX_STORE),
+    );
+    if source == super::exe_path::ExecSource::StoreOnly {
+        eprintln!("{}", super::exe_path::store_only_warning(&exe_path));
+    }
+    let exe = exe_path.to_string_lossy().into_owned();
 
     #[cfg(target_os = "linux")]
     {
@@ -356,7 +369,7 @@ pub(crate) fn ensure_service_installed(overrides: &PathOverrides) -> Result<()> 
         let path = Path::new("/etc/systemd/system/tetron.service");
         let vendor = vendor_unit_exists();
         let owner = if vendor {
-            package_owner(Path::new(&exe))
+            package_owner(Path::new(&running))
         } else {
             None
         };
@@ -622,6 +635,13 @@ pub(crate) async fn cmd_install(
     log_dir: Option<String>,
     socket_path: Option<String>,
 ) -> Result<()> {
+    // PACKAGING-019: NixOS declares the service; nothing to write.
+    if let Some(m) =
+        super::exe_path::nixos_message(Path::new(super::exe_path::NIXOS_MARKER).exists(), "install")
+    {
+        eprintln!("{m}");
+        std::process::exit(1);
+    }
     require_root()?;
     #[cfg(target_os = "linux")]
     require_systemd();
@@ -923,6 +943,14 @@ fn print_kept_data_notice(service_env: Option<&str>) {
 }
 
 pub(crate) fn cmd_uninstall_service() -> Result<()> {
+    // PACKAGING-019: NixOS declares the service; nothing to remove.
+    if let Some(m) = super::exe_path::nixos_message(
+        Path::new(super::exe_path::NIXOS_MARKER).exists(),
+        "uninstall",
+    ) {
+        eprintln!("{m}");
+        std::process::exit(1);
+    }
     // SELFCAPTURE-ROUTE-001: torn down only here, not on ordinary `tetron
     // stop`/restart -- mirrors TUN devices, which are likewise only removed
     // on actual network leave/nuke, never on ordinary stop/start.
