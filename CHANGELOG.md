@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.15.7] - 2026-11-24
+
 ### Fixed
 
 - `tetron install` from a Nix profile wrote the versioned store path of the wrapped binary into the service unit; an upgrade and garbage collection then broke the service, and the wrapper's PATH (iproute2) was lost. It now writes the profile link (argv[0] or PATH), or `$TETRON_EXE` when set, and warns when only a store path is found (PACKAGING-018).
