@@ -89,8 +89,8 @@ class WindowsConsoleAnsi(Requirement):
     console through `anstream` and is not affected.
 
     - No change on Linux/macOS: the call and the fallback are `#[cfg(windows)]`.
-    - The fallback decision is a pure function (`console_ansi(vt_ok: bool) ->
-      bool`) unit-tested on every platform.
+    - The fallback decision is a pure function (`console_ansi(is_windows:
+      bool, vt_ok: bool) -> bool`) unit-tested on every platform.
 
     Depends on WIN-001. Independent of WIN-002.
     """

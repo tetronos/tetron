@@ -387,6 +387,25 @@ struct LogGuard {
 /// the daemon additionally gets a rolling daily file layer under [`logdir::log_dir`]
 /// so daemon activity is diagnosable after the fact.
 /// The returned [`LogGuard`] must be kept alive for the lifetime of the process.
+/// WIN-003: whether the console layer may emit ANSI escapes. Unix terminals
+/// interpret them; a Windows console shows them as raw text unless
+/// virtual-terminal processing was enabled for this process.
+fn console_ansi(is_windows: bool, vt_ok: bool) -> bool {
+    !is_windows || vt_ok
+}
+
+/// WIN-003: enable virtual-terminal processing on the Windows console. Fails
+/// when output is redirected or the console has no VT support.
+#[cfg(windows)]
+fn enable_console_vt() -> bool {
+    enable_ansi_support::enable_ansi_support().is_ok()
+}
+
+#[cfg(not(windows))]
+fn enable_console_vt() -> bool {
+    true
+}
+
 fn init_tracing(to_file: bool) -> LogGuard {
     use tracing_subscriber::prelude::*;
 
@@ -421,7 +440,9 @@ fn init_tracing(to_file: bool) -> LogGuard {
     // specifically) -- so nothing is lost, just tail the file for `trace` detail.
     let console_filter = tracing_subscriber::EnvFilter::new("info");
 
-    let console_layer = tracing_subscriber::fmt::layer().with_filter(console_filter);
+    let console_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(console_ansi(cfg!(windows), enable_console_vt()))
+        .with_filter(console_filter);
 
     // File layer — daemon only, human text with ANSI stripped, rotated daily.
     let (file_layer, appender_guard) = if to_file {
@@ -838,6 +859,18 @@ async fn cmd_set_operator(user: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::console_ansi;
+
+    // WIN-003: ANSI on the console unless this is Windows and VT processing
+    // could not be enabled.
+    #[test]
+    fn console_ansi_off_only_on_windows_without_vt() {
+        assert!(console_ansi(false, false));
+        assert!(console_ansi(false, true));
+        assert!(console_ansi(true, true));
+        assert!(!console_ansi(true, false));
+    }
+
     use super::*;
 
     // JOIN-INPUT-002: positional invite and --invite-file are exclusive, one required.
