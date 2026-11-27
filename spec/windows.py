@@ -186,3 +186,101 @@ class WindowsConfigLocation(Requirement):
     """
     req_id = "WIN-020"
 
+
+class WindowsProtectedConfigDir(Requirement):
+    """REQUIREMENT-ID: WIN-021
+
+    The config directory (and any subdirectory `ensure_dir` creates) is a
+    protected tree: owner LocalSystem or `BUILTIN\\Administrators`, protected
+    DACL (inherits nothing) granting full control to exactly `SYSTEM` and
+    `Administrators`, both inheritable to children (`OICI`). Everything created
+    inside (network configs, invites, blobs, logs) inherits that ACL, so no
+    file under the tree is readable by a standard user. This is the Windows
+    counterpart of `/etc/tetron` being `0750 root:tetron` with `0640`/`0600`
+    files: there is no `tetron` group on Windows, so non-secret files are not
+    opened to `Authenticated Users` either (reads go through IPC).
+
+    - A missing directory is created with that security descriptor in the
+      same `CreateDirectoryW` call (no window with an inherited ACL).
+    - An existing directory must already be owned by `SYSTEM` or
+      `Administrators`. Any other owner is refused with an error naming the
+      path and owner, and is never taken over: `%ProgramData%` lets standard
+      users create subfolders, so a pre-created `tetron` folder is a squatter
+      that may hold planted files (a known `secret_key`). The operator must
+      remove it.
+    - An existing, trusted-owned directory gets its protected DACL re-applied
+      by handle when the process is privileged (the counterpart of the Unix
+      `chmod 0750` on every `ensure_dir`), then read back and verified.
+    - A reparse point (symlink, junction, mount point) at the path is refused;
+      the security handle is opened with `FILE_FLAG_OPEN_REPARSE_POINT`.
+    - A non-privileged process (a standard-user CLI) does not attempt the
+      repair: `ensure_dir` succeeds without changing anything, and the
+      following read fails with access denied, as `/etc/tetron` does for a
+      user outside the `tetron` group.
+    - Pure policy (`owner_decision(existing_owner, current) -> Ok/Err`, the
+      SDDL strings) is unit-tested on every platform; Windows-only tests create
+      a directory, read back owner and DACL with `GetSecurityInfo`, and check a
+      squatted (user-owned) directory is refused.
+
+    Depends on WIN-020 and WIN-025.
+    """
+    req_id = "WIN-021"
+
+
+class WindowsProtectedConfigWrite(Requirement):
+    """REQUIREMENT-ID: WIN-022
+
+    `config::write_file` works on Windows for secret and non-secret files and
+    removes WIN-001's refusal.
+
+    - The staging file is created with `CreateFileW(CREATE_NEW,
+      FILE_FLAG_OPEN_REPARSE_POINT)` and the protected file security
+      descriptor (`SYSTEM` + `Administrators` only, protected) passed at
+      creation, so the bytes never exist under an inherited ACL. Its name
+      carries a random 128-bit nonce, so an existing name is a hard error, not
+      a file to reuse.
+    - After writing, the staging file is flushed through its own write handle
+      (WIN-023), its owner and DACL are read back and verified, then it is
+      renamed over the destination.
+    - An existing destination must be a regular file, not a reparse point, and
+      owned by `SYSTEM` or `Administrators`; otherwise the write is refused and
+      the staging file removed.
+    - Secret and non-secret files get the same ACL on Windows (see WIN-021);
+      the `secret` flag keeps its Unix meaning.
+    - `restrict_perms` on Windows re-applies the protected file DACL by handle
+      to an existing file (used for append-mode files).
+    - The config storage and headless daemon tests that WIN-001's refusal
+      failed on Windows (22) pass there; Windows-only tests read back the
+      written file's owner and DACL.
+
+    Depends on WIN-021.
+    """
+    req_id = "WIN-022"
+
+
+class WindowsSyncThroughWriteHandle(Requirement):
+    """REQUIREMENT-ID: WIN-023
+
+    Every `sync_all`/`sync_data` on Windows goes through a handle opened for
+    writing: `FlushFileBuffers` on a read-only handle returns
+    `ERROR_ACCESS_DENIED`, and a no-op save that treats that error as a change
+    republishes every few seconds. Audit result
+    at the time of writing: the only call is the staging file's own write
+    handle in `write_file`; no-op saves in `config::update_network` return
+    before any file is opened. New sync calls keep to this rule.
+
+    Depends on WIN-022.
+    """
+    req_id = "WIN-023"
+
+
+class WindowsNoUnixOwnership(Requirement):
+    """REQUIREMENT-ID: WIN-024
+
+    Unix ownership and mode handling (`chown` to root, the `tetron` group,
+    `0750`/`0640`/`0600`) does not run on Windows; the ACLs of WIN-021/022
+    carry access instead. On Linux and macOS nothing changes.
+
+    Depends on WIN-022.
+    """
+    req_id = "WIN-024"

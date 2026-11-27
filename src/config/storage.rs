@@ -121,7 +121,16 @@ fn set_owner(path: &Path, secret: bool) {
 }
 
 /// Create `dir` (and parents) with restrictive perms: 0750 root:tetron on
+/// Linux; a protected SYSTEM/Administrators-only tree on Windows (WIN-021).
+/// Idempotent.
+#[cfg(windows)]
+fn ensure_dir(dir: &Path) -> Result<()> {
+    crate::windows_security::ensure_protected_dir(dir)
+}
+
+/// Create `dir` (and parents) with restrictive perms: 0750 root:tetron on
 /// Linux. Idempotent.
+#[cfg(not(windows))]
 fn ensure_dir(dir: &Path) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     #[cfg(target_os = "linux")]
@@ -203,18 +212,21 @@ fn validate_net_name(name: &str) -> Result<()> {
 /// Public so every tetron config writer (identity key, invite ledger, etc.)
 /// shares the same atomic + restrictive-perms guarantees under the config tree.
 pub fn write_file(path: &Path, bytes: &[u8], secret: bool) -> Result<()> {
-    // WIN-001: a secret file needs a protected ACL set at creation, which is
-    // not implemented on Windows yet. Refuse rather than write a key that
-    // inherits the parent directory's default (user-readable) ACL.
-    #[cfg(windows)]
-    if secret {
-        anyhow::bail!(
-            "writing protected file {} is not yet supported on Windows",
-            path.display()
-        );
-    }
     let dir = path.parent().context("config path has no parent")?;
     ensure_dir(dir)?;
+    // WIN-022: every file in the tree gets the protected SYSTEM/Administrators
+    // ACL at creation, so `secret` changes nothing on Windows.
+    #[cfg(windows)]
+    {
+        let _ = secret;
+        crate::windows_security::write_protected_file(path, bytes)
+    }
+    #[cfg(not(windows))]
+    write_file_unix(dir, path, bytes, secret)
+}
+
+#[cfg(not(windows))]
+fn write_file_unix(dir: &Path, path: &Path, bytes: &[u8], secret: bool) -> Result<()> {
     let fname = path
         .file_name()
         .and_then(|s| s.to_str())
@@ -241,8 +253,7 @@ pub fn write_file(path: &Path, bytes: &[u8], secret: bool) -> Result<()> {
 }
 
 /// `0600` for secret files, `0640` otherwise. Best-effort. Windows carries
-/// access in ACLs instead of mode bits (not implemented yet, WIN-001), so this
-/// is a no-op there.
+/// access in ACLs instead of mode bits (WIN-024), so this is a no-op there.
 #[cfg(unix)]
 fn set_mode(path: &Path, secret: bool) {
     let mode = if secret { 0o600 } else { 0o640 };
@@ -260,6 +271,10 @@ fn write_atomic(path: &Path, contents: &str, secret: bool) -> Result<()> {
 /// For append-mode files (e.g. the audit log) that aren't rewritten via
 /// [`write_file`]. Best-effort.
 pub fn restrict_perms(path: &Path, secret: bool) {
+    #[cfg(windows)]
+    if let Err(e) = crate::windows_security::protect_existing_file(path) {
+        tracing::warn!(path = %path.display(), error = %e, "protecting config file failed");
+    }
     set_mode(path, secret);
     #[cfg(target_os = "linux")]
     set_owner(path, secret);
@@ -874,11 +889,30 @@ mod tests {
         CONFIG_CACHE_TL.with(|c| *c.borrow_mut() = None);
     }
 
+    /// A handle that may change `p`'s timestamps. Unix needs only a read
+    /// handle; Windows needs FILE_WRITE_ATTRIBUTES, which a plain open lacks,
+    /// and FILE_FLAG_BACKUP_SEMANTICS to open a directory at all.
+    fn times_handle(p: &Path) -> std::fs::File {
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+            const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+            std::fs::OpenOptions::new()
+                .access_mode(FILE_WRITE_ATTRIBUTES)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                .open(p)
+                .unwrap()
+        }
+        #[cfg(not(windows))]
+        std::fs::File::open(p).unwrap()
+    }
+
     /// Set `p`'s mtime a minute back, out of the racy window (CONFIG-CACHE-002),
     /// so a test can assert cache hits right after writing its files.
     fn backdate(p: &Path) {
         let t = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
-        std::fs::File::open(p).unwrap().set_modified(t).unwrap();
+        times_handle(p).set_modified(t).unwrap();
     }
 
     /// [`backdate`] every file the fingerprint covers under `dir`.
@@ -994,10 +1028,7 @@ mod tests {
         assert_eq!(load_cached_in(dir, false).unwrap().networks.len(), 1);
 
         save_network_in(dir, &net("genesis")).unwrap();
-        std::fs::File::open(&ndir)
-            .unwrap()
-            .set_modified(seen)
-            .unwrap();
+        times_handle(&ndir).set_modified(seen).unwrap();
         assert_eq!(
             load_cached_in(dir, false).unwrap().networks.len(),
             2,

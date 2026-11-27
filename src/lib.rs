@@ -43,3 +43,5 @@ pub mod tun;
 pub mod userdb;
 #[cfg(windows)]
 pub mod windows_identity;
+#[cfg(any(windows, test))]
+pub mod windows_security;
