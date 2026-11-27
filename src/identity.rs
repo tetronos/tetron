@@ -23,7 +23,7 @@ fn key_path() -> Result<PathBuf> {
 pub fn load_or_create() -> Result<SecretKey> {
     let path = key_path()?;
     if path.exists() {
-        let bytes: [u8; 32] = std::fs::read(&path)?
+        let bytes: [u8; 32] = crate::config::read_config_file(&path)?
             .try_into()
             .map_err(|_| anyhow::anyhow!("corrupt secret key file"))?;
         let key = SecretKey::from_bytes(&bytes);
@@ -44,7 +44,7 @@ fn collision_index_path() -> Result<PathBuf> {
 pub fn load_collision_index() -> Result<u32> {
     let path = collision_index_path()?;
     if path.exists() {
-        let s = std::fs::read_to_string(&path).context("read collision_index")?;
+        let s = crate::config::read_config_string(&path).context("read collision_index")?;
         s.trim().parse::<u32>().context("parse collision_index")
     } else {
         Ok(0)

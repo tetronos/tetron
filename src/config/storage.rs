@@ -252,6 +252,33 @@ fn write_file_unix(dir: &Path, path: &Path, bytes: &[u8], secret: bool) -> Resul
     Ok(())
 }
 
+/// Read a file from the config tree. On Windows it must be a regular file (not
+/// a link) owned by SYSTEM or Administrators, checked on the handle the bytes
+/// are read from (WIN-026); a planted file is an error, not trusted content.
+pub fn read_config_file(path: &Path) -> Result<Vec<u8>> {
+    #[cfg(windows)]
+    return crate::windows_security::read_trusted_file(path);
+    #[cfg(not(windows))]
+    std::fs::read(path).with_context(|| format!("reading {}", path.display()))
+}
+
+/// [`read_config_file`] as UTF-8 text.
+pub fn read_config_string(path: &Path) -> Result<String> {
+    String::from_utf8(read_config_file(path)?)
+        .with_context(|| format!("{} is not UTF-8", path.display()))
+}
+
+/// Create a directory for files tetron writes outside `write_file` (the log
+/// directory). On Windows it is a protected directory like the config tree,
+/// whose root it creates protected if missing (WIN-021); elsewhere a plain
+/// `create_dir_all`.
+pub fn create_private_dir(dir: &Path) -> Result<()> {
+    #[cfg(windows)]
+    return crate::windows_security::ensure_protected_dir(dir);
+    #[cfg(not(windows))]
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))
+}
+
 /// `0600` for secret files, `0640` otherwise. Best-effort. Windows carries
 /// access in ACLs instead of mode bits (WIN-024), so this is a no-op there.
 #[cfg(unix)]
@@ -584,7 +611,7 @@ fn load_cached_in(dir: &Path, migrate: bool) -> Result<AppConfig> {
 fn load_in(dir: &Path) -> Result<AppConfig> {
     let settings_path = dir.join(SETTINGS_FILE);
     let settings: Settings = if settings_path.exists() {
-        let s = std::fs::read_to_string(&settings_path).context("reading settings.toml")?;
+        let s = read_config_string(&settings_path).context("reading settings.toml")?;
         toml::from_str(&s).context("parsing settings.toml")?
     } else {
         Settings {
@@ -626,8 +653,7 @@ fn load_in(dir: &Path) -> Result<AppConfig> {
             .collect();
         paths.sort();
         for p in paths {
-            let s =
-                std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))?;
+            let s = read_config_string(&p)?;
             // Atomic writes make a torn file unreachable, but be defensive: skip
             // an unparseable network rather than failing the whole load.
             match toml::from_str::<NetworkConfig>(&s) {
@@ -779,8 +805,7 @@ fn load_network_in(dir: &Path, name: &str) -> Result<Option<NetworkConfig>> {
     if !path.exists() {
         return Ok(None);
     }
-    let s =
-        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let s = read_config_string(&path)?;
     Ok(Some(
         toml::from_str(&s).with_context(|| format!("parsing {}", path.display()))?,
     ))

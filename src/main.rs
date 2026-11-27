@@ -447,7 +447,7 @@ fn init_tracing(to_file: bool) -> LogGuard {
 
     // File layer — daemon only, human text with ANSI stripped, rotated daily.
     let (file_layer, appender_guard) = if to_file {
-        match std::fs::create_dir_all(logdir::log_dir()) {
+        match config::create_private_dir(&logdir::log_dir()) {
             Ok(()) => {
                 // Daily rotation; retain the N most recent files so logs older
                 // than ~a week (compiled default) are pruned automatically
@@ -562,7 +562,7 @@ fn append_panic_log(
 ) -> std::io::Result<()> {
     use std::io::Write as _;
     let dir = logdir::log_dir();
-    std::fs::create_dir_all(&dir)?;
+    config::create_private_dir(&dir).map_err(std::io::Error::other)?;
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())

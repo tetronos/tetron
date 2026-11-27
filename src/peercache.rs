@@ -51,7 +51,7 @@ impl PeerAddrCache {
     fn new(config_dir: &Path) -> Self {
         let path = config_dir.join(CACHE_FILENAME);
         let entries: Vec<Entry> = if path.exists() {
-            std::fs::read(&path)
+            crate::config::read_config_file(&path)
                 .ok()
                 .and_then(|data| rmp_serde::from_slice(&data).ok())
                 .unwrap_or_default()

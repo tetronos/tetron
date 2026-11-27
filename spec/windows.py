@@ -201,7 +201,14 @@ class WindowsProtectedConfigDir(Requirement):
     opened to `Authenticated Users` either (reads go through IPC).
 
     - A missing directory is created with that security descriptor in the
-      same `CreateDirectoryW` call (no window with an inherited ACL).
+      same `CreateDirectoryW` call (no window with an inherited ACL). Missing
+      parent directories are created the same way, recursively, never with
+      `create_dir_all`, and the log directory (created at tracing start-up,
+      before any config access, and by the panic hook) goes through the same
+      call (`config::create_private_dir`). Otherwise the first `create_dir_all`
+      of `logs` would create the config root with `ProgramData`'s inherited
+      ACL, and a standard user could plant files there before the protected
+      DACL is applied; re-applying the DACL later does not change their owner.
     - An existing directory must already be owned by `SYSTEM` or
       `Administrators`. Any other owner is refused with an error naming the
       path and owner, and is never taken over: `%ProgramData%` lets standard
@@ -284,3 +291,25 @@ class WindowsNoUnixOwnership(Requirement):
     Depends on WIN-022.
     """
     req_id = "WIN-024"
+
+
+class WindowsTrustedConfigRead(Requirement):
+    """REQUIREMENT-ID: WIN-026
+
+    On Windows every read of a file in the config tree that tetron trusts
+    (`secret_key`, `collision_index`, `settings.toml`, `networks/*.toml`, the
+    peer address cache) goes through `config::read_config_file`, which opens
+    the file without following a reparse point, checks on that same handle
+    that it is a regular file owned by `SYSTEM` or `Administrators`, and only
+    then reads from the handle. A file with any other owner is an error, never
+    loaded: a key or network config a standard user planted, by whatever gap
+    in the tree's protection, must not become the node's identity or a trusted
+    network. Defence in depth behind WIN-021.
+
+    - Linux and macOS read as before (`std::fs::read`).
+    - Windows-only test: a trusted file reads back; a user-owned file is
+      refused.
+
+    Depends on WIN-021.
+    """
+    req_id = "WIN-026"

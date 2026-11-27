@@ -103,7 +103,9 @@ fn verify_sddl(path: &Path, actual: &str, directory: bool) -> Result<()> {
 }
 
 #[cfg(windows)]
-pub use win::{ensure_protected_dir, protect_existing_file, write_protected_file};
+pub use win::{
+    ensure_protected_dir, protect_existing_file, read_trusted_file, write_protected_file,
+};
 
 #[cfg(windows)]
 mod win {
@@ -213,16 +215,16 @@ mod win {
         attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
     }
 
-    /// Open `path` itself (never a reparse target) for reading or changing its
-    /// security descriptor.
-    fn open_for_security(path: &Path, directory: bool, change: bool) -> Result<File> {
+    /// Open `path` itself (never a reparse target) with `READ_CONTROL` plus
+    /// `access`, and check it is the expected kind of object.
+    fn open_for_security(path: &Path, directory: bool, access: u32) -> Result<File> {
         let flags = FILE_FLAG_OPEN_REPARSE_POINT
             | if directory {
                 FILE_FLAG_BACKUP_SEMANTICS
             } else {
                 FILE_ATTRIBUTE_NORMAL
             };
-        let access = READ_CONTROL | if change { WRITE_DAC } else { 0 };
+        let access = READ_CONTROL | access;
         // SAFETY: `wide` is NUL-terminated; a null security-attributes pointer
         // and template handle are allowed for OPEN_EXISTING.
         let handle = unsafe {
@@ -364,11 +366,14 @@ mod win {
                         dir.display()
                     )
                 })?;
+                // A missing parent is created protected as well, never with
+                // the inherited ACL: a gap in the tree is a gap to plant in.
                 if let Some(parent) = dir.parent()
                     && !parent.as_os_str().is_empty()
+                    && matches!(std::fs::symlink_metadata(parent),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound)
                 {
-                    std::fs::create_dir_all(parent)
-                        .with_context(|| format!("creating {}", parent.display()))?;
+                    ensure_protected_dir(parent)?;
                 }
                 let mut sd = OwnedSecurityDescriptor::from_sddl(&protected_sddl(owner, true))?;
                 let attrs = sd.attributes();
@@ -388,7 +393,7 @@ mod win {
         if owner.is_none() {
             return Ok(());
         }
-        let handle = open_for_security(dir, true, true)?;
+        let handle = open_for_security(dir, true, WRITE_DAC)?;
         let (owner_sid, _) = read_security(&handle, dir)?;
         check_trusted_owner(dir, &owner_sid)?;
         apply_protected_dacl(&handle, dir, true)
@@ -439,7 +444,7 @@ mod win {
                     "refusing reparse point (link or junction) at {}",
                     path.display()
                 );
-                let handle = open_for_security(path, false, false)?;
+                let handle = open_for_security(path, false, 0)?;
                 let (owner_sid, _) = read_security(&handle, path)?;
                 check_trusted_owner(path, &owner_sid).map(drop)
             }
@@ -477,11 +482,27 @@ mod win {
         result
     }
 
+    /// Read a config file only if it is a regular file (not a link) owned by
+    /// `SYSTEM` or `Administrators` (WIN-026). The owner is checked on the
+    /// handle the bytes are read from, so nothing can swap the file between
+    /// the check and the read. A file a standard user planted, whatever left
+    /// the gap to plant it, is refused rather than trusted.
+    pub fn read_trusted_file(path: &Path) -> Result<Vec<u8>> {
+        use std::io::Read;
+        let mut file = open_for_security(path, false, GENERIC_READ)?;
+        let (owner_sid, _) = read_security(&file, path)?;
+        check_trusted_owner(path, &owner_sid)?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .with_context(|| format!("reading {}", path.display()))?;
+        Ok(bytes)
+    }
+
     /// Re-apply the protected file DACL to an existing file (append-mode files
     /// that never go through [`write_protected_file`]). Its owner must already
     /// be trusted.
     pub fn protect_existing_file(path: &Path) -> Result<()> {
-        let handle = open_for_security(path, false, true)?;
+        let handle = open_for_security(path, false, WRITE_DAC)?;
         let (owner_sid, _) = read_security(&handle, path)?;
         check_trusted_owner(path, &owner_sid)?;
         apply_protected_dacl(&handle, path, false)
@@ -493,7 +514,7 @@ mod win {
 
         /// Owner SID and SDDL of an existing path, opened without changing it.
         fn security_of(path: &Path, directory: bool) -> (String, String) {
-            let handle = open_for_security(path, directory, false).unwrap();
+            let handle = open_for_security(path, directory, 0).unwrap();
             read_security(&handle, path).unwrap()
         }
 
@@ -621,6 +642,32 @@ mod win {
             assert!(status.success(), "mklink /J failed");
             let err = ensure_protected_dir(&link).unwrap_err().to_string();
             assert!(err.contains("reparse point"), "{err}");
+        }
+
+        #[test]
+        fn missing_parents_are_created_protected() {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path().join("tetron");
+            let logs = root.join("logs");
+            ensure_protected_dir(&logs).unwrap();
+            for dir in [&root, &logs] {
+                let (_, sddl) = security_of(dir, true);
+                verify_sddl(dir, &sddl, true).unwrap();
+            }
+        }
+
+        #[test]
+        fn only_trusted_files_are_read() {
+            let tmp = tempfile::tempdir().unwrap();
+            let ours = tmp.path().join("settings.toml");
+            write_protected_file(&ours, b"ok").unwrap();
+            assert_eq!(read_trusted_file(&ours).unwrap(), b"ok");
+
+            let planted = tmp.path().join("secret_key");
+            std::fs::write(&planted, b"known key").unwrap();
+            make_user_owned(&planted, false);
+            let err = read_trusted_file(&planted).unwrap_err().to_string();
+            assert!(err.contains("not SYSTEM or Administrators"), "{err}");
         }
 
         #[test]
