@@ -165,3 +165,24 @@ class WindowsTokenIdentity(Requirement):
     """
     req_id = "WIN-025"
 
+
+class WindowsConfigLocation(Requirement):
+    """REQUIREMENT-ID: WIN-020
+
+    On Windows, `config::config_dir()` resolves to `%ProgramData%\\tetron`
+    (from the `PROGRAMDATA` environment variable, fallback
+    `C:\\ProgramData\\tetron`), machine-wide like `/etc/tetron`. The previous
+    non-Linux fallback (`dirs::config_dir()`, the roaming profile) names
+    `C:\\Windows\\System32\\config\\systemprofile` for a LocalSystem service and
+    the user's own `%APPDATA%` for the CLI, so the two would never meet.
+
+    - `logdir::log_dir()` on Windows is `%ProgramData%\\tetron\\logs`, inside the
+      protected tree (WIN-021), so logs inherit its ACL.
+    - `TETRON_CONFIG_DIR` and `TETRON_LOG_DIR` (PORTABILITY-003) still
+      override first, and the override target gets the same protection.
+    - Linux, macOS and Android paths are unchanged.
+
+    Depends on WIN-001.
+    """
+    req_id = "WIN-020"
+

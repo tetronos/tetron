@@ -8,7 +8,9 @@ use std::path::PathBuf;
 /// Directory where the daemon writes rolling daily log files (`tetron.log.*`).
 ///
 /// Linux uses the conventional `/var/log/tetron`; macOS uses `/Library/Logs/tetron`
-/// (visible in Console.app). Other platforms fall back to the user config dir.
+/// (visible in Console.app); Windows uses `%ProgramData%\\tetron\\logs`, inside
+/// the protected config tree (WIN-020). Other platforms fall back to the user
+/// config dir.
 ///
 /// The appender retains the 7 most recent daily files (see `main::init_tracing`),
 /// so logs older than ~a week are pruned automatically.
@@ -30,7 +32,13 @@ pub fn log_dir() -> PathBuf {
     {
         PathBuf::from("/Library/Logs/tetron")
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(windows)]
+    {
+        crate::config::programdata_dir(std::env::var_os("PROGRAMDATA"))
+            .join("tetron")
+            .join("logs")
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))

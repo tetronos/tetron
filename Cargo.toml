@@ -95,7 +95,6 @@ clap_complete = "4"
 # one daemon-wide shared gate (HARDEN-004).
 ratelimit = "0.10"
 dashmap = "6"
-dirs = "6.0.0"
 futures = "0.3"
 iroh = { version = "1", features = ["unstable-custom-transports"] }
 # Used directly by daemon/mesh/tetron_path_selector.rs (PATHPREF-001) to
@@ -146,6 +145,11 @@ harness = false
 # is likewise `#[cfg(not(target_os = "android"))]`.
 [target.'cfg(not(target_os = "android"))'.dependencies]
 tun = { version = "0.8.13", features = ["async"] }
+
+[target.'cfg(not(windows))'.dependencies]
+# Config/log fallback dirs off Linux, and Linux's legacy-location migration.
+# Windows uses %ProgramData% instead (WIN-020).
+dirs = "6.0.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rtnetlink = "0.21.0"

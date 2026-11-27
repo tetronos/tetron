@@ -159,12 +159,26 @@ pub fn config_dir() -> Result<PathBuf> {
     // library still compiles/runs standalone.
     #[cfg(target_os = "android")]
     let dir = PathBuf::from("/data/local/tmp/tetron");
-    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    // WIN-020: machine-wide, like /etc/tetron. `dirs::config_dir()` would name
+    // LocalSystem's roaming profile for the service and the user's own
+    // %APPDATA% for the CLI, so the two would never meet.
+    #[cfg(windows)]
+    let dir = programdata_dir(std::env::var_os("PROGRAMDATA")).join("tetron");
+    #[cfg(not(any(target_os = "linux", target_os = "android", windows)))]
     let dir = dirs::config_dir()
         .context("could not determine config directory")?
         .join("tetron");
     ensure_dir(&dir)?;
     Ok(dir)
+}
+
+/// `%ProgramData%` from its environment value, `C:\\ProgramData` when unset or
+/// empty (WIN-020).
+#[cfg(any(windows, test))]
+pub fn programdata_dir(var: Option<std::ffi::OsString>) -> PathBuf {
+    var.filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
 }
 
 /// Reject a network name that can't be a safe single path component (defence in
@@ -1163,6 +1177,20 @@ mod tests {
         // Idempotent: a second migrate (no legacy file) is a no-op.
         migrate_legacy(dir).unwrap();
         assert_eq!(load_in(dir).unwrap().networks.len(), 2);
+    }
+
+    #[test]
+    fn programdata_dir_uses_the_variable_or_the_fixed_default() {
+        // WIN-020
+        assert_eq!(
+            programdata_dir(Some(r"D:\Data".into())),
+            PathBuf::from(r"D:\Data")
+        );
+        assert_eq!(programdata_dir(None), PathBuf::from(r"C:\ProgramData"));
+        assert_eq!(
+            programdata_dir(Some("".into())),
+            PathBuf::from(r"C:\ProgramData")
+        );
     }
 
     #[test]
