@@ -414,6 +414,10 @@ impl MeshManager {
         let existing_subnets: Vec<crate::membership::Subnet> = config::load()
             .map(|c| c.networks.iter().filter_map(|n| n.subnet).collect())
             .unwrap_or_default();
+        // SUBNET-COLLISION-003: an explicit `--subnet` becomes the node default
+        // only once the network exists and no overlap needed `--force`.
+        let explicit_subnet = subnet.is_some();
+        let mut forced_past_overlap = false;
         let subnet = match subnet {
             Some(requested) => {
                 // SUBNET-COLLISION-001: reject by default, --force to override --
@@ -435,9 +439,7 @@ impl MeshManager {
                         overlapping = %format!("{}/{}", overlapping.0, overlapping.1),
                         "creating network with --force despite subnet overlap"
                     );
-                }
-                if let Err(e) = config::set_node_subnet(requested) {
-                    tracing::warn!(error = %e, "failed to persist node subnet");
+                    forced_past_overlap = true;
                 }
                 requested
             }
@@ -469,6 +471,7 @@ impl MeshManager {
                 interface_addr = %format!("{addr}/{plen}"),
                 "creating network with --force despite physical LAN overlap"
             );
+            forced_past_overlap = true;
         }
         // The creator's own IP must land in the chosen subnet. When it matches the
         // provider's (node) subnet the cached local_ip is correct; otherwise it is
@@ -532,6 +535,12 @@ impl MeshManager {
             subnet: Some(subnet),
             nuke_consensus_threshold,
         })?;
+        if explicit_subnet
+            && !forced_past_overlap
+            && let Err(e) = config::set_node_subnet(subnet)
+        {
+            tracing::warn!(error = %e, "failed to persist node subnet");
+        }
 
         let cancel = self.shutdown_token.child_token();
         let state = Arc::new(std::sync::RwLock::new(net_state));

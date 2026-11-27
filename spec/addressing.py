@@ -2105,3 +2105,31 @@ class SubnetCollisionForcePhysicalLan(Requirement):
     of desktop-only, embedder-inapplicable logic.
     """
     req_id = "SUBNET-COLLISION-002"
+
+
+class ForcedSubnetNotPersistedAsDefault(Requirement):
+    """REQUIREMENT-ID: SUBNET-COLLISION-003
+
+    An explicit `create --subnet` becomes the node's default subnet
+    (`config::set_node_subnet`, the seed for later creates without
+    `--subnet`, and the value SUBNET-012 checks at every daemon start) only
+    when the network was actually created and neither collision check
+    (SUBNET-COLLISION-001 another tetron network, SUBNET-COLLISION-002 the
+    physical LAN) had to be overridden with `--force`.
+
+    Before: the default was written as soon as the explicit subnet passed the
+    tetron-network check, before the physical-LAN check ran. A refused
+    `create --subnet <the LAN's own range>` (no `--force`) or a forced one
+    therefore left the LAN range as the node default, and the next daemon
+    start failed SUBNET-012 ("overlay subnet ... overlaps interface ...")
+    and refused to run until `tetron config unset subnet`. Found live on a
+    Windows test node; the code path is platform-neutral.
+
+    - A forced create still uses the requested subnet for that network; only
+      the node default is left alone.
+    - Test: a create refused for overlapping the physical LAN leaves the
+      node default unset.
+
+    Depends on SUBNET-COLLISION-001, SUBNET-COLLISION-002.
+    """
+    req_id = "SUBNET-COLLISION-003"

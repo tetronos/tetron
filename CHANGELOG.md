@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- `tetron create --subnet` no longer changes the node's default subnet when the create is refused for overlapping the local network, or when `--force` was needed to override an overlap. Before, such a create left that range as the default and the daemon refused to start after its next restart until `tetron config unset subnet` was run.
+
 ## [0.15.7] - 2026-11-24
 
 ### Fixed

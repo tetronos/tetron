@@ -2613,6 +2613,53 @@ mod headless_tests {
         assert!(matches!(daemon.status(), IpcMessage::StatusResponse { .. }));
     }
 
+    // SUBNET-COLLISION-003: a create refused for overlapping the physical LAN
+    // must not leave that range as the node's default subnet, or the next
+    // daemon start fails SUBNET-012.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refused_lan_overlapping_create_leaves_node_subnet_unset() {
+        let Some((iface, addr, plen)) = crate::tun::local_ipv4_interfaces()
+            .into_iter()
+            .find(|&(_, a, p)| !a.is_loopback() && (8..=30).contains(&p))
+        else {
+            eprintln!("skipped: no non-loopback IPv4 interface to collide with");
+            return;
+        };
+        let mask = u32::MAX << (32 - plen);
+        let lan: crate::membership::Subnet = (Ipv4Addr::from(u32::from(addr) & mask), plen);
+
+        let _env_lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let _env_guard = EnvVarGuard::set("TETRON_CONFIG_DIR", tmp.path());
+        let daemon = tokio::time::timeout(std::time::Duration::from_secs(30), build_headless())
+            .await
+            .expect("build_headless should not hang")
+            .expect("build_headless should succeed");
+        assert_eq!(crate::config::load().unwrap().subnet, None);
+
+        let reply = daemon
+            .create_network(
+                GroupMode::Restricted,
+                None,
+                None,
+                None,
+                Some(lan),
+                None,
+                false,
+            )
+            .await;
+        assert!(
+            matches!(&reply, IpcMessage::Error { message } if message.contains("overlaps local interface")),
+            "create on {iface}'s subnet {lan:?} was not refused: {reply:?}"
+        );
+        assert_eq!(
+            crate::config::load().unwrap().subnet,
+            None,
+            "a refused create persisted its subnet as the node default"
+        );
+    }
+
     /// In-memory TUN writer that records every written packet into a shared
     /// buffer, so a test can observe which writer the data plane routed to.
     #[derive(Clone, Default)]

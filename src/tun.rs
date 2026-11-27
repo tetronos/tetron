@@ -111,7 +111,7 @@ pub(crate) fn find_physical_interface_collision(
 /// Returns empty (fail-open) if the platform's enumeration tool is
 /// unavailable or fails -- callers must never block startup on a missing tool.
 #[cfg(target_os = "linux")]
-fn local_ipv4_interfaces() -> Vec<(String, Ipv4Addr, u8)> {
+pub(crate) fn local_ipv4_interfaces() -> Vec<(String, Ipv4Addr, u8)> {
     let out = match Command::new("ip")
         .args(["-o", "-4", "addr", "show"])
         .output()
@@ -153,7 +153,7 @@ fn local_ipv4_interfaces() -> Vec<(String, Ipv4Addr, u8)> {
 /// platform-wide). Interface names are unindented lines ending in `:`;
 /// address lines are indented `inet <addr> netmask 0x<hex>` underneath.
 #[cfg(target_os = "macos")]
-fn local_ipv4_interfaces() -> Vec<(String, Ipv4Addr, u8)> {
+pub(crate) fn local_ipv4_interfaces() -> Vec<(String, Ipv4Addr, u8)> {
     let out = match Command::new("ifconfig").output() {
         Ok(o) if o.status.success() => o.stdout,
         _ => return Vec::new(),
@@ -200,7 +200,7 @@ fn local_ipv4_interfaces() -> Vec<(String, Ipv4Addr, u8)> {
 /// Windows (WIN-043): every IPv4 unicast address from IP Helper, loopback
 /// skipped; empty on failure, the same fail-open as a missing tool elsewhere.
 #[cfg(windows)]
-fn local_ipv4_interfaces() -> Vec<(String, Ipv4Addr, u8)> {
+pub(crate) fn local_ipv4_interfaces() -> Vec<(String, Ipv4Addr, u8)> {
     win::local_ipv4_interfaces()
 }
 
