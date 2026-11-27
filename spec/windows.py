@@ -367,3 +367,95 @@ class NamedPipeClient(Requirement):
     """
     req_id = "WIN-031"
 
+
+class NamedPipeServer(Requirement):
+    """REQUIREMENT-ID: WIN-032
+
+    The daemon serves IPC on the named pipe with the Unix server's semantics:
+    the same accept loop duties (shutdown, coordinator promotion,
+    left-network events), the same per-request handling.
+
+    - The first instance is created with `first_pipe_instance(true)`, so a
+      name already taken (another daemon, or a squatter) is a start-up error
+      instead of a shared pipe. `reject_remote_clients(true)` on every
+      instance. One pending instance always exists: the next one is created
+      before the connected one is handed to its task.
+    - Pipe security descriptor: owner stamped `SYSTEM` (service) or
+      `Administrators` (elevated foreground daemon), so WIN-031's check has a
+      value that does not move with local policy; protected DACL: `SYSTEM`
+      and `Administrators` `GENERIC_ALL`; Authenticated Users
+      `FILE_GENERIC_READ | FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES`
+      (`0x0012018B`). That is the Windows spelling of the Unix socket's
+      `0666`: reaching the daemon is not authority, every mutating request is
+      authorized per caller (AUTHZ-001, WIN-010). It deliberately omits
+      `GENERIC_WRITE`, whose `FILE_APPEND_DATA` bit is
+      `FILE_CREATE_PIPE_INSTANCE` on a pipe: with it, any user could add
+      their own server instance to `\\\\.\\pipe\\tetron`, which shares
+      the first instance's descriptor and so passes WIN-031's owner check,
+      and receive other users' requests.
+    - A failed `connect` or instance creation pauses with the
+      IPC-ADMISSION-003 backoff (a gated `select!` branch, never an inline
+      sleep) and recreates the pending instance.
+    - Tests (Windows): a client round-trips a request; a standard user can
+      not create an instance of the daemon's pipe (checked live on the test
+      VM with a standard account).
+
+    Depends on WIN-030, WIN-021 and WIN-025.
+    """
+    req_id = "WIN-032"
+
+
+class NamedPipeCallerIdentity(Requirement):
+    """REQUIREMENT-ID: WIN-033
+
+    After the first request frame has been read, the handler identifies the
+    client with `ImpersonateNamedPipeClient` + `OpenThreadToken`, builds
+    `Caller::Windows { sid, is_local_system, is_elevated_admin }`
+    (LocalSystem by SID compare, elevation by `CheckTokenMembership` on the
+    client token), and reverts with `RevertToSelf` before returning, inside
+    the same synchronous call: nothing awaits while the thread impersonates.
+    Identifying before the client has written fails intermittently
+    (`ERROR_CANNOT_IMPERSONATE`), hence after the read. If identification
+    fails the caller is unknown (`None`), which is never privileged.
+
+    Depends on WIN-032 and WIN-010.
+    """
+    req_id = "WIN-033"
+
+
+class NamedPipeAdmission(Requirement):
+    """REQUIREMENT-ID: WIN-034
+
+    IPC-ADMISSION-001..003 apply unchanged in meaning on Windows: the
+    first-request read and the reply write are bounded by
+    `ipc.request-timeout`/`ipc.response-timeout`; concurrent handlers are
+    capped by `IpcSlots`, with the reserve open to privileged callers
+    (`Caller::is_privileged`, WIN-010); an over-cap client gets the
+    pre-encoded "daemon busy" frame through one non-blocking `try_write` and
+    the instance is dropped, with no task spawned.
+
+    - The reserve decision needs the caller before any request is read. Only
+      when the general pool is full, the daemon attempts
+      `ImpersonateNamedPipeClient` right after connect; if that fails (the
+      client has not written yet) the caller is treated as unknown and turned
+      away busy. tetron's own client writes immediately after connecting, so
+      an administrator retrying still gets in.
+
+    Depends on WIN-032 and WIN-033.
+    """
+    req_id = "WIN-034"
+
+
+class NamedPipeAddonCheck(Requirement):
+    """REQUIREMENT-ID: WIN-035
+
+    `tetron-webui` and `tetron-systray` depend on `tetron-proto`. WIN-030 is
+    a type-level change (generic `framed`/`send`/`recv`), source-compatible
+    for callers that use `connect`/`send`/`recv`/`framed`/`IpcFramed`. Both
+    addon repos are checked (build against the branch) before merge, and
+    `cargo update -p tetron-proto` is run there when this ships; nothing on
+    the wire changes. No code in this repo.
+
+    Depends on WIN-030.
+    """
+    req_id = "WIN-035"

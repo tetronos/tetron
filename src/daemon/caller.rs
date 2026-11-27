@@ -7,6 +7,7 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Caller {
     /// Peer credentials of a Unix socket connection.
+    #[cfg_attr(not(unix), allow(dead_code))]
     Unix { uid: u32, gid: u32 },
     /// Token of a Windows named-pipe client. Built by the named-pipe server;
     /// exists on every platform so its rules are tested everywhere.

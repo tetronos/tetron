@@ -3,23 +3,26 @@
 //! Current-process token identity on Windows (WIN-025): who this process runs
 //! as, and whether it holds the privileges the Unix build gets from uid 0.
 //!
-//! Only the current-process questions for now; the named-pipe peer identity
-//! joins this module with the named-pipe IPC server.
+//! Also identifies a named-pipe client for the IPC server (WIN-033).
 
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
+use anyhow::{Context, Result};
+use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, LocalFree};
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::{
     CheckTokenMembership, CreateWellKnownSid, DuplicateToken, GetTokenInformation, PSID,
-    SecurityIdentification, TOKEN_DUPLICATE, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    RevertToSelf, SecurityIdentification, TOKEN_DUPLICATE, TOKEN_QUERY, TOKEN_USER, TokenUser,
     WinBuiltinAdministratorsSid,
 };
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+use windows_sys::Win32::System::Pipes::ImpersonateNamedPipeClient;
+use windows_sys::Win32::System::Threading::{
+    GetCurrentProcess, GetCurrentThread, OpenProcessToken, OpenThreadToken,
+};
 
 /// String SID of the LocalSystem account, the identity of a Windows service.
-pub const LOCAL_SYSTEM_SID: &str = "S-1-5-18";
+pub use tetron_proto::ipc::LOCAL_SYSTEM_SID;
 
 /// A token handle closed on drop.
 struct OwnedHandle(HANDLE);
@@ -165,6 +168,64 @@ pub fn is_privileged_process() -> bool {
     current_user_sid().as_deref() == Some(LOCAL_SYSTEM_SID) || is_current_process_elevated_admin()
 }
 
+/// Who is on the other end of a named pipe (WIN-033).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipeClientIdentity {
+    pub sid: String,
+    pub is_local_system: bool,
+    pub is_elevated_admin: bool,
+}
+
+/// Reverts the thread's impersonation on drop, on every path.
+struct ImpersonationGuard;
+
+impl Drop for ImpersonationGuard {
+    fn drop(&mut self) {
+        // SAFETY: no preconditions; ends this thread's impersonation.
+        unsafe { RevertToSelf() };
+    }
+}
+
+/// Identify the client of a connected named-pipe server instance (WIN-033).
+///
+/// Impersonates the client, reads its thread token, and reverts before
+/// returning, all in this synchronous call: nothing awaits while the thread
+/// carries another identity. Call it after the client has written: Windows
+/// identifies from the last message read, and before the first write it fails
+/// intermittently (`ERROR_CANNOT_IMPERSONATE`).
+pub fn named_pipe_client_identity(
+    pipe: &tokio::net::windows::named_pipe::NamedPipeServer,
+) -> Result<PipeClientIdentity> {
+    use std::os::windows::io::AsRawHandle;
+    // SAFETY: the handle of a live server instance, borrowed for this call.
+    if unsafe { ImpersonateNamedPipeClient(pipe.as_raw_handle()) } == 0 {
+        // SAFETY: reads this thread's last error.
+        anyhow::bail!("cannot identify the pipe client (Win32 error {})", unsafe {
+            GetLastError()
+        });
+    }
+    let _revert = ImpersonationGuard;
+    let mut token = std::ptr::null_mut();
+    // SAFETY: open the impersonation token just placed on this thread, checked
+    // against the process's own access (OpenAsSelf = 1).
+    if unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, &mut token) } == 0
+        || token.is_null()
+    {
+        // SAFETY: reads this thread's last error.
+        anyhow::bail!(
+            "cannot open the pipe client token (Win32 error {})",
+            unsafe { GetLastError() }
+        );
+    }
+    let token = OwnedHandle(token);
+    let sid = token_sid(token.0).context("pipe client token has no user SID")?;
+    Ok(PipeClientIdentity {
+        is_local_system: sid == LOCAL_SYSTEM_SID,
+        is_elevated_admin: token_is_admin(token.0),
+        sid,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,6 +234,28 @@ mod tests {
     fn current_user_sid_is_a_windows_sid() {
         let sid = current_user_sid().expect("the process token has a user SID");
         assert!(sid.starts_with("S-1-"), "unexpected SID {sid}");
+    }
+
+    #[tokio::test]
+    async fn pipe_client_identity_is_this_process_and_impersonation_ends() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
+        let name = format!(r"\\.\pipe\tetron-test-ident-{}", std::process::id());
+        let server = ServerOptions::new().create(&name).unwrap();
+        let mut client = ClientOptions::new().open(&name).unwrap();
+        server.connect().await.unwrap();
+        client.write_all(b"x").await.unwrap();
+        let mut server = server;
+        let mut byte = [0u8; 1];
+        server.read_exact(&mut byte).await.unwrap();
+        let id = named_pipe_client_identity(&server).unwrap();
+        assert_eq!(Some(id.sid.clone()), current_user_sid());
+        assert_eq!(id.is_elevated_admin, is_current_process_elevated_admin());
+        // The thread is itself again: it has no impersonation token.
+        let mut token = std::ptr::null_mut();
+        // SAFETY: a query on this thread; a failure is the expected outcome.
+        let opened = unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, &mut token) };
+        assert_eq!(opened, 0, "the thread still impersonates after the call");
     }
 
     #[test]

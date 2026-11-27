@@ -36,14 +36,35 @@ impl TrustedOwner {
         }
     }
 
-    /// A trusted owner from its string SID; any other SID is untrusted.
+    /// A trusted owner from its string SID; any other SID is untrusted. The
+    /// same pair the IPC client accepts as pipe owner (WIN-031).
     pub fn from_sid(sid: &str) -> Option<Self> {
+        use tetron_proto::ipc::{ADMINISTRATORS_SID, LOCAL_SYSTEM_SID};
         match sid {
-            "S-1-5-18" => Some(Self::LocalSystem),
-            "S-1-5-32-544" => Some(Self::Administrators),
+            LOCAL_SYSTEM_SID => Some(Self::LocalSystem),
+            ADMINISTRATORS_SID => Some(Self::Administrators),
             _ => None,
         }
     }
+}
+
+/// Rights every authenticated user gets on the IPC pipe (WIN-032):
+/// `FILE_GENERIC_READ | FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES`, enough to send
+/// one request and read the reply. Not `GENERIC_WRITE`: its `FILE_APPEND_DATA`
+/// bit is `FILE_CREATE_PIPE_INSTANCE` on a pipe, which would let any user add
+/// a server instance that shares this descriptor and receive other users'
+/// requests.
+const PIPE_CLIENT_RIGHTS: u32 = 0x0012_018B;
+
+/// The IPC pipe's descriptor (WIN-032): stamped owner, protected DACL, full
+/// control for `SYSTEM` and `Administrators`, [`PIPE_CLIENT_RIGHTS`] for
+/// Authenticated Users. The Windows spelling of the Unix socket's `0666`:
+/// reaching the daemon is not authority, each request is authorized.
+fn pipe_sddl(owner: TrustedOwner) -> String {
+    format!(
+        "O:{}D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;{PIPE_CLIENT_RIGHTS:#010x};;;AU)",
+        owner.alias()
+    )
 }
 
 /// The full security descriptor, owner plus protected DACL, given to an object
@@ -104,7 +125,8 @@ fn verify_sddl(path: &Path, actual: &str, directory: bool) -> Result<()> {
 
 #[cfg(windows)]
 pub use win::{
-    ensure_protected_dir, protect_existing_file, read_trusted_file, write_protected_file,
+    create_pipe_instance, ensure_protected_dir, protect_existing_file, read_trusted_file,
+    write_protected_file,
 };
 
 #[cfg(windows)]
@@ -482,6 +504,31 @@ mod win {
         result
     }
 
+    /// Create an instance of the daemon's IPC pipe (WIN-032) with the pipe
+    /// descriptor, local clients only. `first` claims the name exclusively,
+    /// so a name someone else already holds is an error, not a shared pipe.
+    pub fn create_pipe_instance(
+        name: &Path,
+        first: bool,
+    ) -> Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+        let owner = current_owner()
+            .context("serving the IPC pipe requires SYSTEM or an elevated Administrator")?;
+        let mut sd = OwnedSecurityDescriptor::from_sddl(&pipe_sddl(owner))?;
+        let mut attrs = sd.attributes();
+        let mut options = tokio::net::windows::named_pipe::ServerOptions::new();
+        options
+            .first_pipe_instance(first)
+            .reject_remote_clients(true);
+        // SAFETY: `attrs` points at `sd`, which outlives the call.
+        unsafe {
+            options.create_with_security_attributes_raw(
+                name.as_os_str(),
+                (&mut attrs as *mut SECURITY_ATTRIBUTES).cast(),
+            )
+        }
+        .with_context(|| format!("creating IPC pipe {}", name.display()))
+    }
+
     /// Read a config file only if it is a regular file (not a link) owned by
     /// `SYSTEM` or `Administrators` (WIN-026). The owner is checked on the
     /// handle the bytes are read from, so nothing can swap the file between
@@ -670,6 +717,38 @@ mod win {
             assert!(err.contains("not SYSTEM or Administrators"), "{err}");
         }
 
+        #[tokio::test]
+        async fn pipe_round_trip_through_the_real_client_and_exclusive_claim() {
+            use tetron_proto::ipc::{self, IpcMessage};
+            let name =
+                std::path::PathBuf::from(format!(r"\\.\pipe\tetron-test-{}", std::process::id()));
+            let server = create_pipe_instance(&name, true).unwrap();
+            // A second exclusive claim on a held name fails (WIN-032).
+            assert!(create_pipe_instance(&name, true).is_err());
+            // connect_to checks the owner (Administrators here) and opens with
+            // the narrow client rights.
+            let mut client = ipc::connect_to(&name).await.unwrap();
+            server.connect().await.unwrap();
+            let mut server = ipc::framed(server);
+            ipc::send(&mut client, IpcMessage::Status).await.unwrap();
+            assert!(matches!(
+                ipc::recv(&mut server).await.unwrap(),
+                IpcMessage::Status
+            ));
+            ipc::send(
+                &mut server,
+                IpcMessage::Ok {
+                    message: "pong".into(),
+                },
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                ipc::recv(&mut client).await.unwrap(),
+                IpcMessage::Ok { message } if message == "pong"
+            ));
+        }
+
         #[test]
         fn existing_file_acl_is_repaired_in_place() {
             let tmp = tempfile::tempdir().unwrap();
@@ -722,6 +801,27 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("S-1-5-21-1-2-3-1001") && err.contains("Remove it"));
+    }
+
+    #[test]
+    fn pipe_grants_users_no_instance_creation() {
+        // WIN-032
+        const FILE_APPEND_DATA: u32 = 0x4; // FILE_CREATE_PIPE_INSTANCE on a pipe
+        const FILE_WRITE_DATA: u32 = 0x2;
+        const FILE_READ_DATA: u32 = 0x1;
+        assert_eq!(PIPE_CLIENT_RIGHTS & FILE_APPEND_DATA, 0);
+        assert_ne!(PIPE_CLIENT_RIGHTS & FILE_WRITE_DATA, 0);
+        assert_ne!(PIPE_CLIENT_RIGHTS & FILE_READ_DATA, 0);
+        for owner in [TrustedOwner::LocalSystem, TrustedOwner::Administrators] {
+            let sddl = pipe_sddl(owner);
+            assert!(
+                sddl.starts_with(&format!("O:{}D:P", owner.alias())),
+                "{sddl}"
+            );
+            assert_eq!(sddl.matches("GA;;;").count(), 2, "{sddl}");
+            assert!(sddl.ends_with("(A;;0x0012018b;;;AU)"), "{sddl}");
+            assert!(!sddl.contains("GW") && !sddl.contains(";;;WD)"), "{sddl}");
+        }
     }
 
     #[test]

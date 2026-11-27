@@ -58,6 +58,7 @@ pub trait TunWrite: Send + 'static {
 /// Tailscale use for their TUN interfaces for the same reason, and it still
 /// fits within QUIC datagram limits.
 #[cfg(not(target_os = "android"))]
+#[cfg_attr(windows, allow(dead_code))] // the Windows TUN (Wintun) is not ported yet
 const TUN_MTU: u16 = 1280;
 
 /// Read half of the TUN device. Owned by [`forward::run_mesh`].

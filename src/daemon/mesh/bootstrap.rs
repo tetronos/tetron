@@ -267,16 +267,159 @@ async fn build_daemon(
     Ok(daemon)
 }
 
-/// WIN-001: the named-pipe IPC server is not implemented on Windows yet, so
-/// the daemon refuses to run there rather than run unreachable.
+/// Serve IPC on the named pipe until the daemon-wide `token` is cancelled
+/// (WIN-032): the Windows counterpart of the Unix socket server below, with the
+/// same loop duties and admission (WIN-034). One pending instance always
+/// exists; the next is created before a connected one is handed to its task.
 #[cfg(windows)]
 async fn serve_ipc(
-    _daemon: &Arc<MeshManager>,
-    _promote_rx: mpsc::Receiver<String>,
-    _left_rx: mpsc::Receiver<String>,
-    _token: CancellationToken,
+    daemon: &Arc<MeshManager>,
+    mut promote_rx: mpsc::Receiver<String>,
+    mut left_rx: mpsc::Receiver<String>,
+    token: CancellationToken,
 ) -> Result<()> {
-    anyhow::bail!("the daemon IPC server is not yet supported on Windows")
+    use tokio::net::windows::named_pipe::NamedPipeServer;
+
+    let name = ipc::socket_path();
+    let mut pending: Option<NamedPipeServer> = Some(
+        crate::windows_security::create_pipe_instance(&name, true).with_context(|| {
+            format!(
+                "cannot claim IPC pipe {}; another tetron daemon (or another program) holds it",
+                name.display()
+            )
+        })?,
+    );
+    tracing::info!(pipe = %name.display(), "IPC named pipe listening");
+
+    // IPC-ADMISSION-002: handler slots, sized once at start.
+    let ipc_cfg = config::load().map(|c| c.ipc).unwrap_or_default();
+    let slots = IpcSlots::new(
+        ipc_cfg.max_clients_or_default(),
+        ipc_cfg.reserved_clients_or_default(),
+    );
+
+    // IPC-ADMISSION-003: a failed connect or instance creation pauses through a
+    // gated branch, never an inline sleep; the pause also recreates a missing
+    // pending instance.
+    let mut accept_errors: u32 = 0;
+    let mut accept_repeats: u32 = 0;
+    let mut accept_paused_until: Option<tokio::time::Instant> = None;
+
+    loop {
+        let connect = async {
+            match &pending {
+                Some(p) => p.connect().await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            _ = tokio::time::sleep_until(accept_paused_until.unwrap_or_else(tokio::time::Instant::now)),
+                if accept_paused_until.is_some() => {
+                accept_paused_until = None;
+                if pending.is_none() {
+                    match crate::windows_security::create_pipe_instance(&name, false) {
+                        Ok(p) => pending = Some(p),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "IPC pipe instance creation failed");
+                            accept_errors = accept_errors.saturating_add(1);
+                            accept_paused_until =
+                                Some(tokio::time::Instant::now() + accept_backoff(accept_errors));
+                        }
+                    }
+                }
+            }
+            _ = token.cancelled() => {
+                tracing::info!("daemon shutting down");
+                daemon.deactivate(None).await;
+                return Ok(());
+            }
+            Some(net) = promote_rx.recv() => {
+                daemon.promote_to_coordinator(&net).await;
+            }
+            Some(net) = left_rx.recv() => {
+                daemon.handle_removed_from_network(&net).await;
+            }
+            result = connect, if accept_paused_until.is_none() => {
+                let Some(connected) = pending.take() else { continue };
+                match result {
+                    Ok(()) => {
+                        if accept_errors > 0 {
+                            if accept_repeats > 0 {
+                                tracing::warn!(repeats = accept_repeats, "IPC accept recovered");
+                            }
+                            accept_errors = 0;
+                            accept_repeats = 0;
+                        }
+                        match crate::windows_security::create_pipe_instance(&name, false) {
+                            Ok(p) => pending = Some(p),
+                            Err(e) => {
+                                tracing::warn!(error = %e, "IPC pipe instance creation failed");
+                                accept_errors = accept_errors.saturating_add(1);
+                                accept_paused_until =
+                                    Some(tokio::time::Instant::now() + accept_backoff(accept_errors));
+                            }
+                        }
+                        // WIN-034: the reserve needs the caller before any read;
+                        // only asked once the general pool is full.
+                        let permit = slots.try_admit(|| {
+                            may_use_reserve(pipe_caller(&connected).as_ref(), || None)
+                        });
+                        let Some(permit) = permit else {
+                            tracing::debug!("IPC client turned away: no free handler slot");
+                            send_busy_reply_pipe(&connected);
+                            continue;
+                        };
+                        let daemon = daemon.clone();
+                        tokio::spawn(async move {
+                            let _permit = permit;
+                            if let Err(e) =
+                                handle_ipc_client(connected, pipe_caller, &daemon).await
+                            {
+                                tracing::debug!(error = %e, "IPC client error");
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        // The instance is broken; drop it and recreate after a pause.
+                        drop(connected);
+                        if accept_errors == 0 {
+                            tracing::warn!(error = %e, "IPC accept error");
+                        } else {
+                            accept_repeats += 1;
+                        }
+                        accept_errors = accept_errors.saturating_add(1);
+                        accept_paused_until =
+                            Some(tokio::time::Instant::now() + accept_backoff(accept_errors));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The caller on a connected pipe instance (WIN-033), or `None` (never
+/// privileged) when Windows can not identify it.
+#[cfg(windows)]
+fn pipe_caller(pipe: &tokio::net::windows::named_pipe::NamedPipeServer) -> Option<Caller> {
+    match crate::windows_identity::named_pipe_client_identity(pipe) {
+        Ok(id) => Some(Caller::Windows {
+            sid: id.sid,
+            is_local_system: id.is_local_system,
+            is_elevated_admin: id.is_elevated_admin,
+        }),
+        Err(e) => {
+            tracing::debug!(error = %e, "IPC pipe client not identified");
+            None
+        }
+    }
+}
+
+/// IPC-ADMISSION-002 on Windows (WIN-034): the busy frame in one non-blocking
+/// write, then the instance is dropped. No task.
+#[cfg(windows)]
+fn send_busy_reply_pipe(pipe: &tokio::net::windows::named_pipe::NamedPipeServer) -> bool {
+    let frame = busy_reply_frame();
+    matches!(pipe.try_write(&frame), Ok(n) if n == frame.len())
 }
 
 /// Bind the IPC Unix socket and serve client requests until the daemon-wide
@@ -372,7 +515,7 @@ async fn serve_ipc(
                     let daemon = daemon.clone();
                     tokio::spawn(async move {
                         let _permit = permit; // held for the life of the handler
-                        if let Err(e) = handle_ipc_client(stream, caller, &daemon).await {
+                        if let Err(e) = handle_ipc_client(stream, move |_| caller, &daemon).await {
                             tracing::debug!(error = %e, "IPC client error");
                         }
                     });
@@ -433,7 +576,6 @@ fn truncate_decode_error(s: &str) -> String {
 /// PROTO-WIRE-001: the reply text for a request this daemon cannot decode:
 /// names this daemon's version and protocol epoch so the client can tell
 /// which side to upgrade, then the decode error. Bounded as a whole.
-#[cfg_attr(not(unix), allow(dead_code))] // WIN-001: used by the Unix IPC server only, for now
 fn undecodable_request_message(err: &str) -> String {
     truncate_decode_error(&format!(
         "request not supported by this daemon (tetron {}, protocol {}): {err}",
@@ -449,12 +591,18 @@ fn undecodable_request_message(err: &str) -> String {
 /// closed". Best-effort: the other common cause of a decode failure is a
 /// client that has already gone away, so the reply send is allowed to fail
 /// silently.
-#[cfg(unix)]
-async fn handle_ipc_client(
-    stream: UnixStream,
-    caller: Option<Caller>,
+///
+/// `identify` names the caller once the first request has been read: Unix
+/// passes the peer credentials read at accept, Windows identifies the pipe
+/// client then, since it can only do so after the client has written (WIN-033).
+async fn handle_ipc_client<S>(
+    stream: S,
+    identify: impl FnOnce(&S) -> Option<Caller>,
     daemon: &Arc<MeshManager>,
-) -> Result<()> {
+) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let mut framed = ipc::framed(stream);
     // IPC-ADMISSION-001: read per connection, so a change applies to the next
     // client without a restart.
@@ -478,6 +626,7 @@ async fn handle_ipc_client(
             return Ok(());
         }
     };
+    let caller = identify(framed.get_ref());
     // No deadline around the request itself: Join/Create and others
     // legitimately run for a long time.
     let resp = daemon.handle_request(req, caller).await;
@@ -489,7 +638,6 @@ async fn handle_ipc_client(
 /// `consecutive_errors` accept failures in a row: none for zero, then 50 ms
 /// doubling to a 1 second cap. Out of file descriptors, accept fails at once
 /// every time, so without a pause the loop spins and floods the journal.
-#[cfg_attr(not(unix), allow(dead_code))] // WIN-001: used by the Unix IPC server only, for now
 fn accept_backoff(consecutive_errors: u32) -> std::time::Duration {
     use std::time::Duration;
     const FIRST: Duration = Duration::from_millis(50);
@@ -540,7 +688,6 @@ impl IpcSlots {
 /// `check_authorized` lets mutate (WIN-010): privileged, or the configured
 /// operator. An unknown caller never may. `operator_uid` is only called for a
 /// known, unprivileged caller.
-#[cfg_attr(not(unix), allow(dead_code))] // WIN-001: used by the Unix IPC server only, for now
 fn may_use_reserve(caller: Option<&Caller>, operator_uid: impl FnOnce() -> Option<u32>) -> bool {
     caller.is_some_and(|c| c.is_privileged() || c.is_operator(operator_uid()))
 }
@@ -549,7 +696,6 @@ fn may_use_reserve(caller: Option<&Caller>, operator_uid: impl FnOnce() -> Optio
 /// no slot was free. Written with a single non-blocking `try_write` into the
 /// empty socket buffer, so no task is spawned and nothing the client does can
 /// park it.
-#[cfg_attr(not(unix), allow(dead_code))] // WIN-001: used by the Unix IPC server only, for now
 fn busy_reply_frame() -> bytes::BytesMut {
     use tokio_util::codec::Encoder;
     let mut buf = bytes::BytesMut::new();
@@ -594,11 +740,13 @@ impl std::error::Error for RequestTimedOut {}
 
 /// IPC-ADMISSION-001: read the first request, giving up after `timeout`. Covers
 /// a client that sends nothing, a partial length prefix, or a partial body.
-#[cfg_attr(not(unix), allow(dead_code))] // WIN-001: used by the Unix IPC server only, for now
-async fn recv_request_bounded(
-    framed: &mut ipc::IpcFramed,
+async fn recv_request_bounded<S>(
+    framed: &mut tokio_util::codec::Framed<S, ipc::MsgpackCodec<IpcMessage>>,
     timeout: std::time::Duration,
-) -> Result<IpcMessage> {
+) -> Result<IpcMessage>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     match tokio::time::timeout(timeout, ipc::recv(framed)).await {
         Ok(r) => r,
         Err(_) => Err(RequestTimedOut.into()),
@@ -607,12 +755,14 @@ async fn recv_request_bounded(
 
 /// IPC-ADMISSION-001: write a reply, giving up after `timeout`. Stops a client
 /// that never reads from holding the handler task and its descriptor.
-#[cfg_attr(not(unix), allow(dead_code))] // WIN-001: used by the Unix IPC server only, for now
-async fn send_reply_bounded(
-    framed: &mut ipc::IpcFramed,
+async fn send_reply_bounded<S>(
+    framed: &mut tokio_util::codec::Framed<S, ipc::MsgpackCodec<IpcMessage>>,
     msg: IpcMessage,
     timeout: std::time::Duration,
-) -> Result<()> {
+) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     match tokio::time::timeout(timeout, ipc::send(framed, msg)).await {
         Ok(r) => r,
         Err(_) => anyhow::bail!("timed out sending IPC reply"),
