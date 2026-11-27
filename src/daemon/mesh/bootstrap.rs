@@ -349,15 +349,19 @@ async fn serve_ipc(
                         accept_errors = 0;
                         accept_repeats = 0;
                     }
-                    let uid = stream.peer_cred().ok().map(|c| c.uid());
+                    // WIN-010: SO_PEERCRED read once; the same identity drives
+                    // admission and the request's authorization.
+                    let caller = stream
+                        .peer_cred()
+                        .ok()
+                        .map(|c| Caller::Unix { uid: c.uid(), gid: c.gid() });
                     let permit = slots.try_admit(|| {
-                        // Only read on a full general pool: root needs no
-                        // lookup, anyone else is compared with the operator UID.
-                        uid == Some(0)
-                            || is_privileged_uid(
-                                uid,
-                                config::load().ok().and_then(|c| c.operator_uid),
-                            )
+                        // Only read on a full general pool: a privileged caller
+                        // needs no lookup, anyone else is compared with the
+                        // operator UID.
+                        may_use_reserve(caller.as_ref(), || {
+                            config::load().ok().and_then(|c| c.operator_uid)
+                        })
                     });
                     let Some(permit) = permit else {
                         // No slot: answer without waiting and close.
@@ -368,7 +372,7 @@ async fn serve_ipc(
                     let daemon = daemon.clone();
                     tokio::spawn(async move {
                         let _permit = permit; // held for the life of the handler
-                        if let Err(e) = handle_ipc_client(stream, &daemon).await {
+                        if let Err(e) = handle_ipc_client(stream, caller, &daemon).await {
                             tracing::debug!(error = %e, "IPC client error");
                         }
                     });
@@ -446,8 +450,11 @@ fn undecodable_request_message(err: &str) -> String {
 /// client that has already gone away, so the reply send is allowed to fail
 /// silently.
 #[cfg(unix)]
-async fn handle_ipc_client(stream: UnixStream, daemon: &Arc<MeshManager>) -> Result<()> {
-    let peer_cred = stream.peer_cred().ok().map(|c| (c.uid(), c.gid()));
+async fn handle_ipc_client(
+    stream: UnixStream,
+    caller: Option<Caller>,
+    daemon: &Arc<MeshManager>,
+) -> Result<()> {
     let mut framed = ipc::framed(stream);
     // IPC-ADMISSION-001: read per connection, so a change applies to the next
     // client without a restart.
@@ -473,7 +480,7 @@ async fn handle_ipc_client(stream: UnixStream, daemon: &Arc<MeshManager>) -> Res
     };
     // No deadline around the request itself: Join/Create and others
     // legitimately run for a long time.
-    let resp = daemon.handle_request(req, peer_cred).await;
+    let resp = daemon.handle_request(req, caller).await;
     send_reply_bounded(&mut framed, resp, limits.response_timeout()).await?;
     Ok(())
 }
@@ -529,12 +536,13 @@ impl IpcSlots {
     }
 }
 
-/// IPC-ADMISSION-002: root, or the configured operator UID (the same identity
-/// `check_authorized` accepts for mutating requests). An unknown caller is
-/// never privileged.
+/// IPC-ADMISSION-002: may use the reserved handler slots. The same callers
+/// `check_authorized` lets mutate (WIN-010): privileged, or the configured
+/// operator. An unknown caller never may. `operator_uid` is only called for a
+/// known, unprivileged caller.
 #[cfg_attr(not(unix), allow(dead_code))] // WIN-001: used by the Unix IPC server only, for now
-fn is_privileged_uid(uid: Option<u32>, operator: Option<u32>) -> bool {
-    uid == Some(0) || (uid.is_some() && uid == operator)
+fn may_use_reserve(caller: Option<&Caller>, operator_uid: impl FnOnce() -> Option<u32>) -> bool {
+    caller.is_some_and(|c| c.is_privileged() || c.is_operator(operator_uid()))
 }
 
 /// IPC-ADMISSION-002: the pre-encoded reply for a connection turned away because
@@ -718,13 +726,16 @@ mod tests {
     }
 
     #[test]
-    fn privileged_uid_is_root_or_the_operator() {
-        assert!(is_privileged_uid(Some(0), None));
-        assert!(is_privileged_uid(Some(1000), Some(1000)));
-        assert!(!is_privileged_uid(Some(1001), Some(1000)));
-        assert!(!is_privileged_uid(Some(1000), None));
-        // Unknown caller is never privileged, even with no operator set.
-        assert!(!is_privileged_uid(None, None));
+    fn reserve_is_for_root_or_the_operator() {
+        let unix = |uid| Caller::Unix { uid, gid: 0 };
+        assert!(may_use_reserve(Some(&unix(0)), || None));
+        assert!(may_use_reserve(Some(&unix(1000)), || Some(1000)));
+        assert!(!may_use_reserve(Some(&unix(1001)), || Some(1000)));
+        assert!(!may_use_reserve(Some(&unix(1000)), || None));
+        // Unknown caller never may, even with no operator set.
+        assert!(!may_use_reserve(None, || None));
+        // Root needs no operator lookup.
+        assert!(may_use_reserve(Some(&unix(0)), || panic!("looked up")));
     }
 
     #[test]

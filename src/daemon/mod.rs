@@ -88,7 +88,10 @@ use crate::tun;
 // see `mesh/mod.rs`. Each holds an additional `impl MeshManager` block. Nested a
 // level down so the module names can be the clean domain names without colliding
 // with the `use crate::{config, …}` aliases above.
+mod caller;
 mod mesh;
+
+pub(crate) use caller::Caller;
 // The mesh core's join handshake and background-task/reconvergence helpers were
 // moved into `mesh/{join,background}.rs`; re-export them at the daemon level so
 // `mod.rs` and the other `mesh/` submodules (via `use super::super::*`) call them
@@ -1152,10 +1155,24 @@ impl MeshManager {
     ///
     /// Identity is taken from the connecting socket's `SO_PEERCRED` (the kernel
     /// vouches for it — it can't be forged by the client), so the socket file
-    /// mode only has to permit the connection, not gate authority.
+    /// mode only has to permit the connection, not gate authority. The rules
+    /// themselves are [`Self::authorize`]; this loads the operator UID.
     pub(crate) fn check_authorized(
         req: &IpcMessage,
-        peer_cred: Option<(u32, u32)>,
+        caller: Option<&Caller>,
+    ) -> Option<IpcMessage> {
+        Self::authorize(req, caller, || {
+            config::load().ok().and_then(|c| c.operator_uid)
+        })
+    }
+
+    /// AUTHZ-001's rules over a platform-neutral caller (WIN-010). Pure apart
+    /// from `operator_uid`, which is only called when the answer depends on it,
+    /// so the daemon's config load stays off the read and privileged paths.
+    pub(crate) fn authorize(
+        req: &IpcMessage,
+        caller: Option<&Caller>,
+        operator_uid: impl FnOnce() -> Option<u32>,
     ) -> Option<IpcMessage> {
         // Reads are available to everyone (AUTHZ-001): `Status`, and
         // `AdminList`/`InviteList` (listing key-holders/invites mutates
@@ -1175,10 +1192,9 @@ impl MeshManager {
             return None;
         }
 
-        let uid = peer_cred.map(|(uid, _)| uid);
-
-        // Root may do anything.
-        if uid == Some(0) {
+        // Root (Windows: LocalSystem or an elevated Administrator) may do
+        // anything.
+        if caller.is_some_and(Caller::is_privileged) {
             return None;
         }
 
@@ -1192,8 +1208,8 @@ impl MeshManager {
         }
 
         // Otherwise the caller must be the configured operator.
-        let operator = config::load().ok().and_then(|c| c.operator_uid);
-        if uid.is_some() && uid == operator {
+        let operator = operator_uid();
+        if caller.is_some_and(|c| c.is_operator(operator)) {
             return None;
         }
 
@@ -1268,9 +1284,9 @@ impl MeshManager {
     pub(crate) async fn handle_request(
         self: &Arc<Self>,
         req: IpcMessage,
-        peer_cred: Option<(u32, u32)>,
+        caller: Option<Caller>,
     ) -> IpcMessage {
-        if let Some(denied) = Self::check_authorized(&req, peer_cred) {
+        if let Some(denied) = Self::check_authorized(&req, caller.as_ref()) {
             return denied;
         }
         // STATUS-CACHE-001: drop the cached snapshot for anything that is not
@@ -3306,7 +3322,10 @@ mod headless_tests {
         // An authorized mutation does invalidate, so the UI is never stale
         // right after something the user just did.
         let _ = daemon
-            .handle_request(IpcMessage::Standby { network: None }, Some((0, 0)))
+            .handle_request(
+                IpcMessage::Standby { network: None },
+                Some(Caller::Unix { uid: 0, gid: 0 }),
+            )
             .await;
         assert!(
             !snapshot_present(),
@@ -3498,13 +3517,22 @@ mod check_authorized_tests {
     #[test]
     fn status_and_sync_are_open_to_any_user() {
         assert!(
-            MeshManager::check_authorized(&IpcMessage::Status, Some((UNPRIVILEGED_UID, 0)))
-                .is_none()
+            MeshManager::check_authorized(
+                &IpcMessage::Status,
+                Some(&Caller::Unix {
+                    uid: UNPRIVILEGED_UID,
+                    gid: 0
+                })
+            )
+            .is_none()
         );
         assert!(
             MeshManager::check_authorized(
                 &IpcMessage::Sync { network: None },
-                Some((UNPRIVILEGED_UID, 0))
+                Some(&Caller::Unix {
+                    uid: UNPRIVILEGED_UID,
+                    gid: 0
+                })
             )
             .is_none()
         );
@@ -3522,7 +3550,10 @@ mod check_authorized_tests {
                 &IpcMessage::AdminList {
                     network: "any-net".to_string()
                 },
-                Some((UNPRIVILEGED_UID, 0))
+                Some(&Caller::Unix {
+                    uid: UNPRIVILEGED_UID,
+                    gid: 0
+                })
             )
             .is_none()
         );
@@ -3531,7 +3562,10 @@ mod check_authorized_tests {
                 &IpcMessage::InviteList {
                     network: "any-net".to_string()
                 },
-                Some((UNPRIVILEGED_UID, 0))
+                Some(&Caller::Unix {
+                    uid: UNPRIVILEGED_UID,
+                    gid: 0
+                })
             )
             .is_none()
         );
@@ -3543,7 +3577,10 @@ mod check_authorized_tests {
     fn mutating_command_denied_for_unprivileged_caller() {
         let denied = MeshManager::check_authorized(
             &IpcMessage::Standby { network: None },
-            Some((UNPRIVILEGED_UID, 0)),
+            Some(&Caller::Unix {
+                uid: UNPRIVILEGED_UID,
+                gid: 0,
+            }),
         );
         assert!(matches!(denied, Some(IpcMessage::Error { .. })));
     }
@@ -3552,8 +3589,58 @@ mod check_authorized_tests {
     #[test]
     fn root_bypasses_authorization() {
         assert!(
-            MeshManager::check_authorized(&IpcMessage::Standby { network: None }, Some((0, 0)))
-                .is_none()
+            MeshManager::check_authorized(
+                &IpcMessage::Standby { network: None },
+                Some(&Caller::Unix { uid: 0, gid: 0 })
+            )
+            .is_none()
         );
+    }
+
+    /// WIN-010: every AUTHZ-001 rule over both caller variants and `None`.
+    /// `true` = permitted.
+    #[test]
+    fn authorize_table_over_callers() {
+        const OP: u32 = 1000;
+        let root = Caller::Unix { uid: 0, gid: 0 };
+        let operator = Caller::Unix { uid: OP, gid: OP };
+        let user = Caller::Unix {
+            uid: 1001,
+            gid: 1001,
+        };
+        let win = |is_local_system, is_elevated_admin| Caller::Windows {
+            sid: "S-1-5-21-1-2-3-1001".to_string(),
+            is_local_system,
+            is_elevated_admin,
+        };
+        let (system, admin, win_user) = (win(true, false), win(false, true), win(false, false));
+        let read = IpcMessage::Status;
+        let mutate = IpcMessage::Standby { network: None };
+        let set_op = IpcMessage::SetOperator { uid: OP };
+        let callers: [(&str, Option<&Caller>); 7] = [
+            ("none", None),
+            ("root", Some(&root)),
+            ("operator", Some(&operator)),
+            ("user", Some(&user)),
+            ("system", Some(&system)),
+            ("admin", Some(&admin)),
+            ("win_user", Some(&win_user)),
+        ];
+        //                        none   root  op     user   system admin win_user
+        let want_read = [true, true, true, true, true, true, true];
+        let want_mutate = [false, true, true, false, true, true, false];
+        let want_set_op = [false, true, false, false, true, true, false];
+        for (i, (name, caller)) in callers.iter().enumerate() {
+            for (req, want) in [
+                (&read, want_read[i]),
+                (&mutate, want_mutate[i]),
+                (&set_op, want_set_op[i]),
+            ] {
+                let got = MeshManager::authorize(req, *caller, || Some(OP)).is_none();
+                assert_eq!(got, want, "{name} {req:?}");
+            }
+        }
+        // With no operator configured, the would-be operator is just a user.
+        assert!(MeshManager::authorize(&mutate, Some(&operator), || None).is_some());
     }
 }

@@ -18,6 +18,9 @@ from libspec import Requirement
 #   WIN-002 and WIN-003 each need WIN-001 (a Windows binary must link before
 #     its stack reserve or console setup can matter). 002 and 003 are
 #     independent of each other.
+#   WIN-010 needs WIN-001 (the Windows variant must compile) and nothing else.
+#     It changes no behavior; the named-pipe server (later) constructs the
+#     Windows variant.
 # ==========================================================================
 
 
@@ -95,3 +98,40 @@ class WindowsConsoleAnsi(Requirement):
     Depends on WIN-001. Independent of WIN-002.
     """
     req_id = "WIN-003"
+
+
+class IpcCaller(Requirement):
+    """REQUIREMENT-ID: WIN-010
+
+    The daemon's IPC authorization works on a platform-neutral caller identity
+    instead of a raw Unix `(uid, gid)`, so the Windows named-pipe server can
+    plug into the same checks.
+
+    - `enum Caller` (daemon module) with `Unix { uid, gid }` and
+      `Windows { sid, is_local_system, is_elevated_admin }`. Both variants
+      exist on every platform (plain data), so the Windows rules are
+      unit-tested on Linux; only the code that builds a `Caller` from an OS
+      handle is platform-gated.
+    - `Caller::is_privileged()`: Unix uid 0; Windows LocalSystem or an
+      elevated Administrator token.
+    - `Caller::is_operator(operator_uid: Option<u32>)`: Unix uid equals the
+      configured operator UID; always false for Windows until a Windows
+      operator account exists (no `set-operator` on Windows yet).
+    - Both are pure (the operator UID is passed in, not loaded).
+    - `check_authorized(req, Option<&Caller>)` and `handle_request(req,
+      Option<Caller>)` replace the `(uid, gid)` parameters. AUTHZ-001's rules
+      are unchanged: reads open to everyone; privileged callers may do
+      anything; `SetOperator` only for privileged callers; otherwise the
+      caller must be the operator; an unknown caller (`None`) is never
+      privileged and never the operator.
+    - The IPC-ADMISSION-002 reserved-slot check uses the same two methods, so
+      "who may use the reserve" can not drift from "who may mutate".
+    - The Unix accept loop reads `SO_PEERCRED` once per connection, builds the
+      `Caller`, and passes it to the handler (previously read twice).
+    - Unix behavior is identical: the existing AUTHZ and admission tests pass
+      unchanged in substance; a table-driven test covers every rule over both
+      variants and `None`.
+
+    Depends on WIN-001.
+    """
+    req_id = "WIN-010"
