@@ -7,6 +7,9 @@
 //! binary (without the wrapper's PATH to iproute2) at a versioned path that
 //! garbage collection removes after an upgrade. A profile link that resolves
 //! into the store (`~/.nix-profile/bin/tetron`) stays valid across upgrades.
+// Finding a stable executable path for the systemd/launchd unit; Windows
+// installs into %ProgramFiles% instead (WIN-056).
+#![cfg_attr(windows, allow(dead_code))]
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};

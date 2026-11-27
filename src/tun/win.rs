@@ -169,22 +169,31 @@ fn netsh() -> std::path::PathBuf {
 
 /// Run netsh with a bounded wait; the output is not needed, only success.
 fn run_netsh(args: &[String]) -> Result<()> {
+    run_bounded(&netsh(), args)
+}
+
+/// Run `program` (an absolute path) with a bounded wait, discarding output.
+fn run_bounded(program: &std::path::Path, args: &[String]) -> Result<()> {
     const LIMIT: Duration = Duration::from_secs(15);
-    let mut child = std::process::Command::new(netsh())
+    let mut child = std::process::Command::new(program)
         .args(args)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .context("starting netsh")?;
+        .with_context(|| format!("starting {}", program.display()))?;
     let deadline = std::time::Instant::now() + LIMIT;
     loop {
-        if let Some(status) = child.try_wait().context("waiting for netsh")? {
-            anyhow::ensure!(status.success(), "netsh exited with {status}");
+        if let Some(status) = child.try_wait().context("waiting for a child process")? {
+            anyhow::ensure!(
+                status.success(),
+                "{} exited with {status}",
+                program.display()
+            );
             return Ok(());
         }
         if std::time::Instant::now() >= deadline {
             let _ = child.kill();
-            bail!("netsh did not finish within {LIMIT:?}");
+            bail!("{} did not finish within {LIMIT:?}", program.display());
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -234,4 +243,25 @@ pub(super) fn install_echo_rules(adapter: &str, v4: Ipv4Addr, v6: Ipv6Addr) -> R
         .with_context(|| format!("adding firewall rule {name}"))?;
     }
     Ok(())
+}
+
+/// Delete every tetron echo rule, of any adapter (WIN-055, uninstall). Matched
+/// by the display names [`rule_names`] creates; PowerShell's rule cmdlets are
+/// used because `netsh`'s listing is localized text.
+pub(super) fn remove_all_echo_rules() -> Result<()> {
+    let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+    let ps = std::path::Path::new(&root)
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    run_bounded(
+        &ps,
+        &[
+            "-NoProfile".into(),
+            "-NonInteractive".into(),
+            "-Command".into(),
+            "Get-NetFirewallRule -DisplayName 'tetron tetron-* echo' -ErrorAction SilentlyContinue | Remove-NetFirewallRule".into(),
+        ],
+    )
 }

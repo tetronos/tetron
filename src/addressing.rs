@@ -40,7 +40,8 @@ pub fn subnet_change_warning(chosen: Subnet, live: Subnet) -> Option<String> {
     (chosen != live).then(|| {
         let (b, p) = chosen;
         format!(
-            "subnet {b}/{p} takes effect after `sudo tetron restart` (this node's live overlay is still on the previous subnet)"
+            "subnet {b}/{p} takes effect after `{}` (this node's live overlay is still on the previous subnet)",
+            crate::admin_command("restart")
         )
     })
 }

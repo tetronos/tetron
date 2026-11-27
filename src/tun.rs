@@ -654,6 +654,12 @@ pub fn delete(tun_name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Delete every tetron ICMP echo firewall rule on the host (WIN-055).
+#[cfg(windows)]
+pub fn remove_all_echo_rules() -> Result<()> {
+    win::remove_all_echo_rules()
+}
+
 /// Windows (WIN-045, WIN-047): the adapter itself closes, and is removed,
 /// when the network's TUN tasks end and the device halves drop; here only its
 /// firewall rules go.

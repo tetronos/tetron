@@ -229,6 +229,7 @@ pub(crate) fn started_line(reply: &str) -> String {
 
 /// What uninstall and package removal keep, and how to delete it by hand
 /// (PACKAGING-013, purge policy).
+#[cfg_attr(windows, allow(dead_code))] // Unix service managers only
 pub(crate) fn kept_data_notice(config_dir: &Path, log_dir: &Path) -> String {
     format!(
         "Kept: the node identity and settings in {c} and the logs in {l} \
@@ -241,12 +242,14 @@ pub(crate) fn kept_data_notice(config_dir: &Path, log_dir: &Path) -> String {
 }
 
 /// Description line of the unit template `tetron install` writes.
+#[cfg_attr(windows, allow(dead_code))] // Unix service managers only
 const UNIT_TEMPLATE_DESCRIPTION: &str = "Description=tetron P2P mesh VPN";
 
 /// Path overrides carried by an `/etc` unit that `tetron install` wrote, or
 /// `None` when the unit is not one of ours: its description is not the
 /// template's, or its `ExecStart` does not run a `tetron` binary with the
 /// `daemon` argument (PACKAGING-016).
+#[cfg_attr(windows, allow(dead_code))] // Unix service managers only
 pub(crate) fn legacy_unit_overrides(text: &str) -> Option<PathOverrides> {
     if !text.lines().any(|l| l.trim() == UNIT_TEMPLATE_DESCRIPTION) {
         return None;
@@ -276,6 +279,7 @@ pub(crate) fn legacy_unit_overrides(text: &str) -> Option<PathOverrides> {
 }
 
 /// Flags given on this run win; the legacy unit fills the gaps (PACKAGING-016).
+#[cfg_attr(windows, allow(dead_code))] // Unix service managers only
 pub(crate) fn merge_overrides(flags: &PathOverrides, legacy: &PathOverrides) -> PathOverrides {
     PathOverrides {
         config_dir: flags
@@ -292,6 +296,7 @@ pub(crate) fn merge_overrides(flags: &PathOverrides, legacy: &PathOverrides) -> 
 
 /// Move `file` into `backup_dir` as `<name>.<stamp>`, creating the directory.
 /// Copies then removes, so it works across filesystems (PACKAGING-016).
+#[cfg_attr(windows, allow(dead_code))] // Unix service managers only
 pub(crate) fn move_to_backup(file: &Path, backup_dir: &Path, stamp: u64) -> Result<PathBuf> {
     std::fs::create_dir_all(backup_dir)
         .with_context(|| format!("failed to create {}", backup_dir.display()))?;
@@ -339,6 +344,7 @@ fn vendor_unit_exists() -> bool {
 /// path-override env vars the user requested. Idempotent — safe to call on
 /// every `tetron install`, keeping the exec path fresh if the binary moves.
 #[allow(unused_variables)]
+#[cfg_attr(windows, allow(dead_code))] // Unix service managers only
 pub(crate) fn ensure_service_installed(overrides: &PathOverrides) -> Result<()> {
     let running = std::env::current_exe()
         .context("failed to determine current executable path")?
@@ -484,9 +490,15 @@ pub(crate) fn ensure_service_installed(overrides: &PathOverrides) -> Result<()> 
 /// networks. Unlike the old `up`, this never silently installs or starts the
 /// system service -- if no daemon is reachable, it errors the same way
 /// regardless of caller privilege and points at the actual bootstrap command.
+/// How to install the service, in the platform's own words.
+#[cfg(unix)]
+const INSTALL_HINT: &str = "sudo tetron install";
+#[cfg(windows)]
+const INSTALL_HINT: &str = "tetron install (from an elevated terminal)";
+
 pub(crate) async fn cmd_resume(hostname: Option<String>, network: Option<String>) -> Result<()> {
     let Ok(mut stream) = ipc::connect().await else {
-        eprintln!("tetron service is not running. Install and start it with: sudo tetron install");
+        eprintln!("tetron service is not running. Install and start it with: {INSTALL_HINT}");
         std::process::exit(1);
     };
     ipc::send(&mut stream, ipc::IpcMessage::Resume { hostname, network }).await?;
@@ -537,6 +549,12 @@ pub(crate) async fn install_and_start_service(
         anyhow::bail!("system service not supported on this platform");
     }
 
+    wait_and_activate(hostname, overrides).await
+}
+
+/// After the service manager started the daemon: wait until it answers IPC,
+/// then activate the VPN; on failure print the daemon's log tail and exit.
+async fn wait_and_activate(hostname: Option<String>, overrides: &PathOverrides) -> Result<()> {
     // Propagate path overrides into this process's environment so the IPC
     // client (`wait_for_daemon` -> `ipc::connect()` -> `socket_path()`) can
     // find the daemon on the custom socket. Without this, the daemon listens
@@ -586,13 +604,21 @@ pub(crate) async fn install_and_start_service(
     }
 }
 
-/// WIN-001: the Windows service is not implemented yet.
+/// Windows (WIN-051, WIN-056): copy into `%ProgramFiles%\tetron`, register
+/// or refresh service `tetron`, start it, then wait and activate as on Linux.
 #[cfg(windows)]
 pub(crate) async fn install_and_start_service(
-    _hostname: Option<String>,
-    _overrides: &PathOverrides,
+    hostname: Option<String>,
+    overrides: &PathOverrides,
 ) -> Result<()> {
-    anyhow::bail!("installing the system service is not yet supported on Windows")
+    if overrides.config_dir.is_some()
+        || overrides.log_dir.is_some()
+        || overrides.socket_path.is_some()
+    {
+        anyhow::bail!("--config-dir, --log-dir and --socket-path are not supported on Windows yet");
+    }
+    super::winservice::install_and_start()?;
+    wait_and_activate(hostname, overrides).await
 }
 
 /// When the service is (re)installed under `sudo`, grant the invoking user
@@ -706,6 +732,10 @@ pub(crate) fn service_unit_exists() -> bool {
     {
         return Path::new("/Library/LaunchDaemons/com.tetron.vpn.plist").exists();
     }
+    #[cfg(windows)]
+    {
+        return super::winservice::service_exists();
+    }
     #[allow(unreachable_code)]
     false
 }
@@ -721,7 +751,10 @@ pub(crate) async fn restart_service_and_wait() -> Result<()> {
     #[cfg(target_os = "macos")]
     run_cmd("launchctl", &["kickstart", "-k", "system/com.tetron.vpn"]);
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(windows)]
+    super::winservice::restart()?;
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     anyhow::bail!("system service not supported on this platform");
 
     match wait_for_daemon(DAEMON_REACHABLE_TIMEOUT).await {
@@ -745,7 +778,7 @@ pub(crate) async fn cmd_restart() -> Result<()> {
     #[cfg(target_os = "linux")]
     require_systemd();
     if !service_unit_exists() {
-        eprintln!("tetron service is not installed. Run: sudo tetron install");
+        eprintln!("tetron service is not installed. Run: {INSTALL_HINT}");
         std::process::exit(1);
     }
     restart_service_and_wait().await
@@ -773,7 +806,10 @@ pub(crate) async fn cmd_stop() -> Result<()> {
         &["unload", "/Library/LaunchDaemons/com.tetron.vpn.plist"],
     );
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(windows)]
+    super::winservice::stop()?;
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     anyhow::bail!("system service not supported on this platform");
 
     println!("tetron service stopped.");
@@ -789,7 +825,7 @@ pub(crate) async fn cmd_start() -> Result<()> {
     #[cfg(target_os = "linux")]
     require_systemd();
     if !service_unit_exists() {
-        eprintln!("tetron service is not installed. Run: sudo tetron install");
+        eprintln!("tetron service is not installed. Run: {INSTALL_HINT}");
         std::process::exit(1);
     }
 
@@ -802,7 +838,10 @@ pub(crate) async fn cmd_start() -> Result<()> {
         &["load", "-w", "/Library/LaunchDaemons/com.tetron.vpn.plist"],
     );
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(windows)]
+    super::winservice::start()?;
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     anyhow::bail!("system service not supported on this platform");
 
     match wait_for_daemon(DAEMON_REACHABLE_TIMEOUT).await {
@@ -866,6 +905,9 @@ pub(crate) fn print_daemon_log_tail() {
         eprintln!("\nRecent daemon log (journalctl -u tetron):");
         run_cmd("journalctl", &["-u", "tetron", "-n", "15", "--no-pager"]);
     }
+
+    #[cfg(windows)]
+    super::winservice::print_log_tail();
 }
 
 #[allow(dead_code)]
@@ -938,6 +980,7 @@ fn vendor_unit_path() -> Option<PathBuf> {
 /// `TETRON_CONFIG_DIR` and `TETRON_LOG_DIR` from systemd's `Environment=`
 /// property (`systemctl show -p Environment --value`), so uninstall names the
 /// directories the service actually used (PACKAGING-013).
+#[cfg_attr(windows, allow(dead_code))] // Unix service managers only
 pub(crate) fn service_env_dirs(env: &str) -> (Option<String>, Option<String>) {
     let get = |key: &str| {
         env.split_whitespace()
@@ -949,6 +992,7 @@ pub(crate) fn service_env_dirs(env: &str) -> (Option<String>, Option<String>) {
 
 /// Print what uninstall keeps. `service_env` is the unit's `Environment=`
 /// value when known; it wins over this process's defaults (PACKAGING-013).
+#[cfg_attr(windows, allow(dead_code))] // Unix service managers only
 fn print_kept_data_notice(service_env: Option<&str>) {
     let (config, log) = service_env.map(service_env_dirs).unwrap_or((None, None));
     let config = match config {
@@ -1020,6 +1064,12 @@ pub(crate) fn cmd_uninstall_service() -> Result<()> {
             println!("Service not installed.");
         }
         return Ok(());
+    }
+
+    #[cfg(windows)]
+    {
+        require_root()?;
+        return super::winservice::uninstall();
     }
 
     #[allow(unreachable_code)]

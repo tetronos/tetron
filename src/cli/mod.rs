@@ -16,6 +16,10 @@ mod invite;
 mod network;
 mod service;
 mod status;
+#[cfg(windows)]
+mod winservice;
+#[cfg(windows)]
+pub(crate) use winservice::run_dispatcher as run_service_dispatcher;
 
 pub(crate) use admin::*;
 pub(crate) use invite::*;

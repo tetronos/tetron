@@ -35,6 +35,11 @@ from libspec import Requirement
 #     MTU, metric, stale addresses = WIN-041/042/045/048 in the same
 #     function), WIN-044 (standby), WIN-043 (interface enumeration),
 #     WIN-047 (firewall), WIN-046/049 (verifications).
+#   WIN-050..056 (Windows service) need WIN-025, WIN-032 (IPC, which the
+#     installer waits on) and WIN-040. Order: WIN-050 (SCM entry), WIN-056
+#     (install location), WIN-051/052 (install and lifecycle commands,
+#     failure actions), WIN-053/054 (privilege and logs, mostly in place),
+#     WIN-055 (uninstall).
 # ==========================================================================
 
 
@@ -640,3 +645,121 @@ class WintunPathCandidates(Requirement):
     Depends on WIN-040.
     """
     req_id = "WIN-049"
+
+
+class WindowsServiceEntry(Requirement):
+    """REQUIREMENT-ID: WIN-050
+
+    `tetron daemon` keeps running in the foreground (Ctrl+C shuts it down).
+    `tetron daemon --service` (hidden flag) runs under the Service Control
+    Manager: the dispatcher thread registers a control handler, reports
+    `Running`, runs the daemon on its own tokio runtime with a fresh shutdown
+    token, maps SCM Stop and Shutdown to cancelling that token (reporting
+    `StopPending` with a wait hint), and reports `Stopped` with exit code 0,
+    or a service-specific exit code 1 when the daemon returned an error, so
+    the failure actions (WIN-052) apply. Started outside the SCM the flag is
+    an error, not a foreground run. `--service` is refused off Windows.
+
+    Depends on WIN-025.
+    """
+    req_id = "WIN-050"
+
+
+class WindowsServiceRegistration(Requirement):
+    """REQUIREMENT-ID: WIN-051
+
+    `tetron install` (elevated) registers service `tetron`: own process,
+    LocalSystem, automatic start with delayed start (the network stack is up
+    first), command line `"<install dir>\\tetron.exe" daemon --service` with
+    the executable path quoted (an unquoted path with spaces is a privilege
+    escalation). An existing service is stopped and its configuration
+    updated, as `install` refreshes on Linux. Then it starts the service,
+    waits for the daemon to answer IPC, and sends `Resume`, as on Linux.
+
+    - `tetron start` / `stop` / `restart` drive the same service and wait for
+      the target state (stop) or for IPC (start, restart).
+    - Each command opens the service manager and the service with only the
+      access rights it needs (connect/create; start, stop, query, change
+      configuration, delete as applicable).
+    - `--config-dir`, `--log-dir` and `--socket-path` are refused on Windows
+      with a message (a service environment block is not implemented).
+
+    Depends on WIN-050 and WIN-056.
+    """
+    req_id = "WIN-051"
+
+
+class WindowsServiceFailureActions(Requirement):
+    """REQUIREMENT-ID: WIN-052
+
+    The service restarts after a failure: restart after 5 s, then 10 s, then
+    30 s for every later failure, counters reset after a day, and the actions
+    also apply when the service stops with an error exit code (not only on a
+    crash). This is the Windows half of the fail-fast model: the daemon's
+    panic hook aborts and relies on the service manager to bring it back.
+
+    Depends on WIN-051.
+    """
+    req_id = "WIN-052"
+
+
+class WindowsServicePrivilege(Requirement):
+    """REQUIREMENT-ID: WIN-053
+
+    The service commands require an elevated Administrator (WIN-025's
+    `require_root`/`check_root`), and their messages name an elevated
+    terminal, not `sudo`: every "run this with administrator rights" hint
+    goes through `admin_command(args)`, which yields `sudo tetron <args>` on
+    Unix (text unchanged) and `tetron <args> (from an elevated terminal)` on
+    Windows. Granting operator access to the invoking user after
+    install (`$SUDO_USER` on Unix) does nothing on Windows: Windows has no
+    operator account yet.
+
+    Depends on WIN-025.
+    """
+    req_id = "WIN-053"
+
+
+class WindowsServiceLogs(Requirement):
+    """REQUIREMENT-ID: WIN-054
+
+    Under the service the rolling file logs, the panic log and live log-level
+    reload (LOG-004) work unchanged under `%ProgramData%\\tetron\\logs`.
+    When the service never becomes reachable, the installer prints the tail
+    of the newest log file there, as Linux prints the journal.
+
+    Depends on WIN-050 and WIN-020.
+    """
+    req_id = "WIN-054"
+
+
+class WindowsServiceUninstall(Requirement):
+    """REQUIREMENT-ID: WIN-055
+
+    `tetron uninstall` (elevated) stops and deletes the service (its Wintun
+    adapters close with the daemon) and deletes every tetron ICMP echo
+    firewall rule (WIN-047). `%ProgramData%\\tetron` (identity, networks,
+    logs) is kept and its path printed, as on Linux and macOS. The installed
+    program files are removed, except the running executable when uninstall
+    runs from the install directory itself; its path is printed then.
+
+    Depends on WIN-051.
+    """
+    req_id = "WIN-055"
+
+
+class WindowsServiceInstallLocation(Requirement):
+    """REQUIREMENT-ID: WIN-056
+
+    The service never runs an executable a standard user can replace: it
+    runs as LocalSystem, so an `.exe` (or the `wintun.dll` beside it) in a
+    user-writable folder such as Downloads would be a privilege escalation.
+    `tetron install` copies `tetron.exe` and `wintun.dll` into
+    `%ProgramFiles%\\tetron`, whose inherited ACL lets only Administrators
+    and SYSTEM write, and registers that copy. When `install` already runs
+    from there, nothing is copied. A missing `wintun.dll` beside the running
+    `tetron.exe` is an install error.
+
+    Depends on WIN-040.
+    """
+    req_id = "WIN-056"

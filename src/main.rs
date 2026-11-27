@@ -1,8 +1,3 @@
-// WIN-001: on Windows the system-service install/uninstall path is not
-// implemented yet, so its Unix helpers are unreachable there. Lifted when the
-// Windows service lands.
-#![cfg_attr(windows, allow(dead_code))]
-
 // The daemon's modules live in the `tetron` library crate (`src/lib.rs`) so
 // integration tests and benchmarks can reach them; this binary is the CLI/IPC
 // client built on top.
@@ -171,7 +166,12 @@ pub(crate) enum Command {
     Status,
     /// Run the daemon in the foreground (invoked by the system service)
     #[command(hide = true)]
-    Daemon,
+    Daemon {
+        /// Run under the Windows Service Control Manager (WIN-050); used only
+        /// in the registered service's command line.
+        #[arg(long, hide = true)]
+        service: bool,
+    },
     /// Resume: bring the data plane online. Requires the service to already
     /// be installed and running (see `tetron install`)
     Resume {
@@ -586,7 +586,7 @@ async fn main() -> Result<()> {
         JSON_FLAG.store(true, atomic::Ordering::Relaxed);
     }
     // Keep the appender guard alive for the whole process so file logs flush.
-    let _log_guard = init_tracing(matches!(cli.command, Command::Daemon));
+    let _log_guard = init_tracing(matches!(cli.command, Command::Daemon { .. }));
 
     match cli.command {
         Command::Leave { network, force } => ipc_leave(&network, force).await,
@@ -634,9 +634,17 @@ async fn main() -> Result<()> {
             endpoint_id,
         } => ipc_kick(&network_key, &endpoint_id).await,
         Command::Status => ipc_status().await,
-        Command::Daemon => {
+        Command::Daemon { service } => {
             check_root();
             install_panic_hook();
+            if service {
+                // WIN-050: the SCM dispatcher owns this thread until the
+                // service stops; the daemon runs on its own runtime there.
+                #[cfg(windows)]
+                return tokio::task::block_in_place(cli::run_service_dispatcher);
+                #[cfg(not(windows))]
+                anyhow::bail!("--service is only used by the Windows service");
+            }
             let token = shutdown::token();
             let stats = Arc::new(stats::ForwardMetrics::default());
             stats.spawn_logger(token.clone());
@@ -695,8 +703,16 @@ async fn cmd_config(action: Option<ConfigAction>, json: bool) -> Result<()> {
                 && e.kind() == std::io::ErrorKind::PermissionDenied
             {
                 anyhow::bail!(
-                    "config is root-only; re-run with sudo: sudo tetron config get{}",
-                    key.as_deref().map(|k| format!(" {k}")).unwrap_or_default()
+                    "config is {}: {}",
+                    if cfg!(windows) {
+                        "administrator-only; re-run as"
+                    } else {
+                        "root-only; re-run with sudo"
+                    },
+                    tetron::admin_command(&format!(
+                        "config get{}",
+                        key.as_deref().map(|k| format!(" {k}")).unwrap_or_default()
+                    ))
                 );
             }
             let cfg = config::load()?;
@@ -726,7 +742,10 @@ async fn cmd_config(action: Option<ConfigAction>, json: bool) -> Result<()> {
             } else if key == "path-preference" {
                 announce_path_preference_change("Set").await;
             } else {
-                println!("Set {key}. Run 'sudo tetron restart' for changes to take effect.");
+                println!(
+                    "Set {key}. Run '{}' for changes to take effect.",
+                    tetron::admin_command("restart")
+                );
             }
         }
         ConfigAction::Unset { key } => {
@@ -739,7 +758,8 @@ async fn cmd_config(action: Option<ConfigAction>, json: bool) -> Result<()> {
                 announce_path_preference_change("Reset").await;
             } else {
                 println!(
-                    "Reset {key} to default. Run 'sudo tetron restart' for changes to take effect."
+                    "Reset {key} to default. Run '{}' for changes to take effect.",
+                    tetron::admin_command("restart")
                 );
             }
         }
@@ -757,7 +777,10 @@ async fn announce_log_level_change(verb: &str, key: &str) {
             println!("{verb} {key}. Applied immediately to the running daemon (no restart needed).")
         }
         Err(_) => {
-            println!("{verb} {key}. Run 'sudo tetron restart' for changes to take effect.")
+            println!(
+                "{verb} {key}. Run '{}' for changes to take effect.",
+                tetron::admin_command("restart")
+            )
         }
     }
 }
@@ -793,7 +816,8 @@ async fn announce_path_preference_change(verb: &str) {
         }
         Err(_) => {
             println!(
-                "{verb} path-preference. Run 'sudo tetron restart' for changes to take effect."
+                "{verb} path-preference. Run '{}' for changes to take effect.",
+                tetron::admin_command("restart")
             )
         }
     }

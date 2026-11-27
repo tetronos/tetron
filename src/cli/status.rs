@@ -64,7 +64,10 @@ pub(crate) fn print_json(value: &serde_json::Value) {
 pub(crate) fn infer_hint(message: &str) -> Option<String> {
     let m = message.to_lowercase();
     if m.contains("daemon") && (m.contains("not running") || m.contains("connect")) {
-        Some("start the service: sudo tetron install".into())
+        Some(format!(
+            "start the service: {}",
+            tetron::admin_command("install")
+        ))
     } else if m.contains("expired") || m.contains("invite") {
         Some("ask the coordinator for a fresh code: tetron invite <net>".into())
     } else if m.contains("root") || m.contains("permission") || m.contains("operator") {
@@ -289,7 +292,10 @@ pub(crate) async fn ipc_status() -> Result<()> {
                     "  ! daemon is v{} but CLI is v{}",
                     daemon_version, cli_version,
                 );
-                println!("  (run `sudo tetron restart` to restart the daemon onto the new binary)");
+                println!(
+                    "  (run `{}` to restart the daemon onto the new binary)",
+                    tetron::admin_command("restart")
+                );
             }
             // PROTO-EPOCH-004: a different wire protocol generation is a
             // warning, never a refusal (USER R5).

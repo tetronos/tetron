@@ -11,6 +11,16 @@
 
 pub const APP_NAME: &str = "tetron";
 
+/// `tetron <args>` the way a user runs it with administrator rights (WIN-053):
+/// `sudo tetron <args>` on Unix, from an elevated terminal on Windows.
+pub fn admin_command(args: &str) -> String {
+    if cfg!(windows) {
+        format!("tetron {args} (from an elevated terminal)")
+    } else {
+        format!("sudo tetron {args}")
+    }
+}
+
 pub mod addressing;
 pub mod config;
 pub mod control;
