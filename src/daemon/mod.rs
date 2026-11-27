@@ -926,6 +926,16 @@ impl MeshManager {
                 if let Some(handle) = self.networks.get(network) {
                     *handle.tun_name.lock().unwrap() = tun_name.clone();
                 }
+                // WIN-044: the adapter stays up on standby, so outbound
+                // packets are gated by the network's `active` flag.
+                #[cfg(windows)]
+                let Some(reader) = self
+                    .networks
+                    .get(network)
+                    .map(|h| tun::GatedReader::new(reader, h.active.clone()))
+                else {
+                    return;
+                };
                 self.attach_tun(network, reader, writer).await;
                 if self.active.load(Ordering::SeqCst) {
                     if let Some(handle) = self.networks.get(network) {

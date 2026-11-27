@@ -11,7 +11,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 #[cfg(not(any(target_os = "android", windows)))]
 use std::process::Command;
 
-#[cfg(not(any(target_os = "android", windows)))]
+#[cfg(not(target_os = "android"))]
 use anyhow::Context;
 #[cfg(not(target_os = "android"))]
 use anyhow::{Result, bail};
@@ -19,7 +19,7 @@ use anyhow::{Result, bail};
 // off Android, where the packet interface is a `VpnService` fd instead.
 #[cfg(not(target_os = "android"))]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-#[cfg(not(any(target_os = "android", windows)))]
+#[cfg(not(target_os = "android"))]
 use tun::Configuration;
 #[cfg(not(target_os = "android"))]
 use tun::{DeviceReader, DeviceWriter};
@@ -58,7 +58,6 @@ pub trait TunWrite: Send + 'static {
 /// Tailscale use for their TUN interfaces for the same reason, and it still
 /// fits within QUIC datagram limits.
 #[cfg(not(target_os = "android"))]
-#[cfg_attr(windows, allow(dead_code))] // the Windows TUN (Wintun) is not ported yet
 const TUN_MTU: u16 = 1280;
 
 /// Read half of the TUN device. Owned by [`forward::run_mesh`].
@@ -198,11 +197,63 @@ fn local_ipv4_interfaces() -> Vec<(String, Ipv4Addr, u8)> {
     result
 }
 
-/// WIN-001: Windows enumeration (`GetAdaptersAddresses`) is not implemented
-/// yet. Empty is the documented fail-open result, the same as a missing tool.
+/// Windows (WIN-043): every IPv4 unicast address from IP Helper, loopback
+/// skipped; empty on failure, the same fail-open as a missing tool elsewhere.
 #[cfg(windows)]
 fn local_ipv4_interfaces() -> Vec<(String, Ipv4Addr, u8)> {
-    Vec::new()
+    win::local_ipv4_interfaces()
+}
+
+#[cfg(windows)]
+mod win;
+
+/// Wintun adapter name and GUID for a network (WIN-040), from the node's
+/// overlay IPv6 address: bytes 1..7 are the network's own /56 prefix
+/// (`derive_ipv6` takes them from `blake3(network key)`), so both are stable
+/// per network and the same after a restart, which lets Windows reuse the
+/// adapter and its network profile.
+#[cfg(any(windows, test))]
+pub fn adapter_identity(v6: Ipv6Addr) -> (String, u128) {
+    let net = &v6.octets()[1..7];
+    let name = format!("tetron-{}", hex::encode(net));
+    let mut input = b"tetron wintun adapter guid ".to_vec();
+    input.extend_from_slice(net);
+    let mut guid = [0u8; 16];
+    guid.copy_from_slice(&blake3::hash(&input).as_bytes()[..16]);
+    // RFC 9562 version 8 (custom) and variant bits, so it reads as a GUID.
+    guid[6] = (guid[6] & 0x0f) | 0x80;
+    guid[8] = (guid[8] & 0x3f) | 0x80;
+    (name, u128::from_be_bytes(guid))
+}
+
+/// A packet reader gated by its network's `active` flag (WIN-044). On Windows
+/// standby leaves the Wintun adapter up (disabling it would end the session),
+/// so packets the host sends into the adapter while the network is on standby
+/// are read and dropped here, the outbound counterpart of the writer's gate.
+/// `Ok(0)` is the `TunRead` "retry" result.
+#[cfg(any(windows, test))]
+pub struct GatedReader<R> {
+    inner: R,
+    active: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(any(windows, test))]
+impl<R> GatedReader<R> {
+    pub fn new(inner: R, active: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+        Self { inner, active }
+    }
+}
+
+#[cfg(any(windows, test))]
+impl<R: TunRead> TunRead for GatedReader<R> {
+    async fn read_into(&mut self, buf: &mut bytes::BytesMut) -> anyhow::Result<usize> {
+        let n = self.inner.read_into(buf).await?;
+        if n > 0 && !self.active.load(std::sync::atomic::Ordering::Relaxed) {
+            buf.truncate(buf.len() - n);
+            return Ok(0);
+        }
+        Ok(n)
+    }
 }
 
 /// Creates a TUN device with the given virtual IPs and splits it into
@@ -246,17 +297,65 @@ pub async fn create(
     Ok((TunReader { reader }, TunWriter { writer }, tun_name))
 }
 
-/// WIN-001: the Wintun arm is not implemented yet. It must not reuse the Unix
-/// `Configuration` above as is: on Windows the `tun` crate turns an IPv4
-/// `destination` into a `0.0.0.0/0` route through the adapter, which would
-/// pull all of the host's IPv4 traffic into the mesh.
+/// Interface metric of a tetron adapter (WIN-048), both families.
+#[cfg(windows)]
+const WINDOWS_ADAPTER_METRIC: u16 = 10;
+
+/// `wintun.dll` next to `tetron.exe`, by absolute path (WIN-040): never a bare
+/// name, which would search the working directory (`System32` for a service).
+#[cfg(windows)]
+fn wintun_path() -> Result<std::path::PathBuf> {
+    let exe = std::env::current_exe().context("locating tetron.exe")?;
+    let dll = exe
+        .parent()
+        .context("tetron.exe has no parent directory")?
+        .join("wintun.dll");
+    anyhow::ensure!(
+        dll.is_file(),
+        "{} is missing; put the amd64 wintun.dll from wintun.net next to tetron.exe",
+        dll.display()
+    );
+    Ok(dll)
+}
+
+/// Windows: one Wintun adapter per network (WIN-040..048).
+///
+/// No `destination`: on Windows the `tun` crate turns an IPv4 destination into
+/// a `0.0.0.0/0` route through the adapter, which would pull all of the host's
+/// IPv4 traffic into the mesh. The overlay routes come from the addresses'
+/// on-link prefix lengths only.
 #[cfg(windows)]
 pub async fn create(
-    _v4: Ipv4Addr,
-    _v6: Ipv6Addr,
-    _subnet: crate::membership::Subnet,
+    v4: Ipv4Addr,
+    v6: Ipv6Addr,
+    subnet: crate::membership::Subnet,
 ) -> Result<(TunReader, TunWriter, String)> {
-    bail!("creating a TUN device is not yet supported on Windows")
+    let (_, prefix) = subnet;
+    let nm = crate::membership::subnet_netmask(prefix).octets();
+    let (name, guid) = adapter_identity(v6);
+    let dll = wintun_path()?;
+    let mut config = Configuration::default();
+    config
+        .tun_name(&name)
+        .address(v4)
+        .netmask((nm[0], nm[1], nm[2], nm[3]))
+        .mtu(TUN_MTU)
+        .metric(WINDOWS_ADAPTER_METRIC)
+        .up();
+    config.platform_config(|p| {
+        p.device_guid(guid);
+        p.wintun_file(dll.as_os_str());
+    });
+    let device =
+        tun::create_as_async(&config).with_context(|| format!("creating Wintun adapter {name}"))?;
+    let luid = win::luid_of(&name)?;
+    win::assign_addresses(luid, v4, v6, crate::membership::IPV6_NETWORK_PREFIX_LEN)?;
+    if let Err(e) = win::install_echo_rules(&name, v4, v6) {
+        tracing::warn!(adapter = %name, error = %e, "firewall echo rules not installed; inbound ping will not work");
+    }
+    tracing::info!(addr = %v4, ipv6 = %v6, tun = %name, "TUN device created");
+    let (writer, reader) = device.split()?;
+    Ok((TunReader { reader }, TunWriter { writer }, name))
 }
 
 /// Assigns the TUN's own IPv6 address. The `200::/7` peer range is routed into
@@ -497,8 +596,10 @@ pub async fn route_self_loopback(_v4: Ipv4Addr, _v6: Ipv6Addr) -> Result<()> {
     Ok(())
 }
 
-/// WIN-001: not implemented on Windows yet (needs IP Helper routes on the
-/// adapter LUID).
+/// Windows (WIN-041): nothing to add. The adapter's addresses carry the
+/// network's on-link prefix lengths (/24-style IPv4 netmask, /56 IPv6), from
+/// which Windows derives both peer-range routes, and standby leaves them in
+/// place (WIN-044).
 #[cfg(windows)]
 pub async fn route_peer_range(
     _tun_name: &str,
@@ -506,7 +607,7 @@ pub async fn route_peer_range(
     _network_prefix: Ipv6Addr,
     _prefix_len: u8,
 ) -> Result<()> {
-    bail!("routing the peer range is not yet supported on Windows")
+    Ok(())
 }
 
 /// Bring the TUN interface administratively up (used when activating the VPN).
@@ -553,10 +654,13 @@ pub fn delete(tun_name: &str) -> Result<()> {
     Ok(())
 }
 
-/// WIN-001: not implemented on Windows yet.
+/// Windows (WIN-045, WIN-047): the adapter itself closes, and is removed,
+/// when the network's TUN tasks end and the device halves drop; here only its
+/// firewall rules go.
 #[cfg(windows)]
-pub fn delete(_tun_name: &str) -> Result<()> {
-    bail!("deleting a TUN device is not yet supported on Windows")
+pub fn delete(tun_name: &str) -> Result<()> {
+    win::remove_echo_rules(tun_name);
+    Ok(())
 }
 
 #[cfg(not(target_os = "android"))]
@@ -579,12 +683,10 @@ fn set_link_state(tun_name: &str, up: bool) -> Result<()> {
             .context("run ip link set")?;
         anyhow::ensure!(status.success(), "ip link set {state} failed with {status}");
     }
+    // WIN-044: disabling a Wintun adapter ends its session and the reader with
+    // it; standby is enforced by the `active` gate on both directions instead.
     #[cfg(windows)]
-    {
-        let _ = (tun_name, up);
-        bail!("changing TUN link state is not yet supported on Windows");
-    }
-    #[cfg(not(windows))]
+    let _ = (tun_name, up);
     Ok(())
 }
 
@@ -604,5 +706,53 @@ impl TunWrite for TunWriter {
     async fn write_packet(&mut self, packet: &[u8]) -> anyhow::Result<()> {
         self.writer.write_all(packet).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adapter_identity_is_stable_per_network() {
+        // WIN-040: same /56 network prefix, different node part -> same adapter.
+        let a: Ipv6Addr = "2ab:cdef:0123:4500:1111:2222:3333:4444".parse().unwrap();
+        let b: Ipv6Addr = "2ab:cdef:0123:4599:aaaa:bbbb:cccc:dddd".parse().unwrap();
+        let other: Ipv6Addr = "2ab:cdef:0124:4500:1111:2222:3333:4444".parse().unwrap();
+        let (name, guid) = adapter_identity(a);
+        assert_eq!(name, "tetron-abcdef012345");
+        assert_eq!(adapter_identity(b), (name.clone(), guid));
+        let (oname, oguid) = adapter_identity(other);
+        assert_ne!(oname, name);
+        assert_ne!(oguid, guid);
+        // GUID version 8 and RFC variant bits.
+        let bytes = guid.to_be_bytes();
+        assert_eq!(bytes[6] >> 4, 8);
+        assert_eq!(bytes[8] >> 6, 0b10);
+        assert!(name.len() <= 127);
+    }
+
+    struct FakeReader(Vec<&'static [u8]>);
+
+    impl TunRead for FakeReader {
+        async fn read_into(&mut self, buf: &mut bytes::BytesMut) -> anyhow::Result<usize> {
+            let p = self.0.remove(0);
+            buf.extend_from_slice(p);
+            Ok(p.len())
+        }
+    }
+
+    #[tokio::test]
+    async fn gated_reader_drops_while_inactive() {
+        // WIN-044: standby drops outbound packets without disturbing the pool.
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let active = std::sync::Arc::new(AtomicBool::new(false));
+        let mut r = GatedReader::new(FakeReader(vec![b"one", b"two"]), active.clone());
+        let mut buf = bytes::BytesMut::with_capacity(64);
+        assert_eq!(r.read_into(&mut buf).await.unwrap(), 0);
+        assert!(buf.is_empty());
+        active.store(true, Ordering::Relaxed);
+        assert_eq!(r.read_into(&mut buf).await.unwrap(), 3);
+        assert_eq!(&buf[..], b"two");
     }
 }

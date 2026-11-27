@@ -30,6 +30,11 @@ from libspec import Requirement
 #     owners) and WIN-025 (token helpers). Order: WIN-030 (generic framing,
 #     pipe name), WIN-031 (client), WIN-032 (server + pipe ACL), WIN-033
 #     (caller identity), WIN-034 (admission), WIN-035 (addon check, no code).
+#   WIN-040..049 (Wintun TUN) need WIN-001 and run under WIN-025's
+#     privilege. Order: WIN-040 (adapter: create, identity, addresses,
+#     MTU, metric, stale addresses = WIN-041/042/045/048 in the same
+#     function), WIN-044 (standby), WIN-043 (interface enumeration),
+#     WIN-047 (firewall), WIN-046/049 (verifications).
 # ==========================================================================
 
 
@@ -467,3 +472,171 @@ class NamedPipeAddonCheck(Requirement):
     Depends on WIN-030.
     """
     req_id = "WIN-035"
+
+
+class WintunAdapter(Requirement):
+    """REQUIREMENT-ID: WIN-040
+
+    `tun::create` on Windows creates (or reopens) one Wintun adapter per
+    network through the `tun` crate.
+
+    - Never sets `destination`: on Windows the `tun` crate turns an IPv4
+      destination into a `0.0.0.0/0` route through the adapter, which would
+      pull all of the host's IPv4 traffic into the mesh. The overlay subnet
+      route comes from the address and netmask (on-link), nothing else.
+    - Adapter name `tetron-<12 hex>` and adapter GUID are derived from the
+      network's IPv6 /56 prefix (bytes 1..7 of the node's overlay IPv6, which
+      `derive_ipv6` takes from `blake3(network key)`): stable per network, so
+      a restart reuses the adapter and Windows reuses its network profile
+      instead of accumulating "Network 2, 3, ...". Pure
+      `adapter_identity(v6)`, unit-tested everywhere.
+    - `wintun.dll` is loaded by absolute path from the directory of
+      `tetron.exe`, never by bare name (a service's working directory is
+      `System32`; a bare name is a DLL-planting risk). A missing DLL is an
+      error naming the expected path.
+    - The returned name is the adapter name, used by every later call.
+
+    Depends on WIN-001 and WIN-025.
+    """
+    req_id = "WIN-040"
+
+
+class WintunAddresses(Requirement):
+    """REQUIREMENT-ID: WIN-041
+
+    The adapter gets the node's overlay IPv4 address with the network's
+    netmask, and its overlay IPv6 address with on-link prefix length
+    `IPV6_NETWORK_PREFIX_LEN` (/56), both through IP Helper
+    (`CreateUnicastIpAddressEntry` on the adapter LUID, DAD state preferred),
+    never `netsh` or PowerShell. Windows derives the on-link /24 and /56
+    routes from those prefix lengths, the IPV6-003 per-network route,
+    so `route_peer_range` has nothing left to add on Windows and is a no-op
+    there (deviation from a separate `CreateIpForwardEntry2` route, which
+    would duplicate the on-link one).
+
+    Depends on WIN-040.
+    """
+    req_id = "WIN-041"
+
+
+class WintunMtu(Requirement):
+    """REQUIREMENT-ID: WIN-042
+
+    MTU 1280 (`TUN_MTU`) on the adapter's IPv4 and IPv6 subinterfaces, set
+    through the `tun` crate's `mtu`, which sets both families. Checked live:
+    both subinterfaces report 1280, and a 1280-byte ICMP echo and a bulk TCP
+    transfer cross the mesh both ways.
+
+    Depends on WIN-040.
+    """
+    req_id = "WIN-042"
+
+
+class WindowsLocalInterfaces(Requirement):
+    """REQUIREMENT-ID: WIN-043
+
+    `local_ipv4_interfaces()` on Windows enumerates every IPv4 unicast
+    address with its on-link prefix (`GetUnicastIpAddressTable`) and its
+    interface alias, skipping loopback, the same set the Linux arm returns,
+    so the SUBNET-012/SUBNET-COLLISION-002 guards work on Windows instead of
+    silently passing. A failed enumeration returns empty (the documented
+    fail-open), as on the other platforms.
+
+    Depends on WIN-001.
+    """
+    req_id = "WIN-043"
+
+
+class WindowsStandbyKeepsSession(Requirement):
+    """REQUIREMENT-ID: WIN-044
+
+    Standby does not disable the Wintun adapter: disabling it ends the Wintun
+    session and the reader task with it, so resume would have no data plane.
+    On Windows `set_link_up`/`set_link_down` are no-ops that succeed;
+    forwarding is already gated per network by the network's `active` flag
+    in both directions (PORTABILITY-005), which is what standby means.
+    Linux and macOS are unchanged.
+
+    Depends on WIN-040.
+    """
+    req_id = "WIN-044"
+
+
+class WintunTeardownAndStale(Requirement):
+    """REQUIREMENT-ID: WIN-045
+
+    - Teardown (`tun::delete`, MULTISEG-003): the adapter is closed when the
+      network's TUN tasks end and the device halves drop; closing an adapter
+      this process created removes it. `delete` itself only removes the
+      network's firewall rules (WIN-047) and succeeds.
+    - A reused adapter (left by a crash, reopened by name) is cleaned: every
+      unicast address on it other than the node's own two is deleted before
+      the addresses are assigned, so an old subnet or address can not
+      linger.
+
+    Depends on WIN-040.
+    """
+    req_id = "WIN-045"
+
+
+class WindowsSelfLoopback(Requirement):
+    """REQUIREMENT-ID: WIN-046
+
+    `route_self_loopback` needs nothing on Windows: Windows answers traffic
+    to its own unicast addresses locally. Verified live: pinging the node's
+    own overlay IPv4 and IPv6 answers.
+
+    Depends on WIN-041.
+    """
+    req_id = "WIN-046"
+
+
+class WintunFirewallEcho(Requirement):
+    """REQUIREMENT-ID: WIN-047
+
+    Wintun adapters land on the Public firewall profile, so inbound traffic
+    on the overlay is blocked by default. tetron adds exactly two inbound
+    allow rules per network, ICMPv4 echo request and ICMPv6 echo request,
+    each scoped to the node's own overlay address of that network
+    (`localip`), named `tetron <adapter> ICMPv4/ICMPv6 echo`, so `ping`
+    across the mesh works. All other inbound stays under the user's own
+    firewall policy; the adapter's profile is not changed. Rules are
+    re-created idempotently (delete by name, then add) at adapter creation
+    and deleted in `tun::delete`. `netsh` is run by its absolute path under
+    `%SystemRoot%\\System32`, with a bounded wait; a failure is a warning,
+    never fatal (the mesh still works, only inbound ping does not).
+
+    Depends on WIN-040.
+    """
+    req_id = "WIN-047"
+
+
+class WintunInterfaceMetric(Requirement):
+    """REQUIREMENT-ID: WIN-048
+
+    The adapter gets an explicit interface metric (both families) through the
+    `tun` crate's `metric`, so an overlay prefix never competes on equal
+    terms with a physical route. Only the overlay prefixes route through the
+    adapter (WIN-040, WIN-041); checked live: no `0.0.0.0/0` or `::/0` route
+    references a tetron adapter.
+
+    Depends on WIN-040.
+    """
+    req_id = "WIN-048"
+
+
+class WintunPathCandidates(Requirement):
+    """REQUIREMENT-ID: WIN-049
+
+    Check (no code unless it fails): a peer advertising its own Wintun
+    overlay address as a direct-path candidate is the PATH-DIAG-007 case;
+    PATH-BLEED-001's status-layer filter (`ipv6_in_network`/`ip_in_subnet`
+    on the network's own ranges) is platform-neutral and must hide it in
+    `tetron status` on Windows too. Verified live once two nodes are
+    joined. Suppressing such a candidate at the transport layer on Windows
+    is separate, open work (the Windows counterpart of
+    SELFCAPTURE-ROUTE-001).
+
+    Depends on WIN-040.
+    """
+    req_id = "WIN-049"
