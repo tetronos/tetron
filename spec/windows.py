@@ -656,8 +656,10 @@ class WindowsServiceEntry(Requirement):
     `Running`, runs the daemon on its own tokio runtime with a fresh shutdown
     token, maps SCM Stop and Shutdown to cancelling that token (reporting
     `StopPending` with a wait hint), and reports `Stopped` with exit code 0,
-    or a service-specific exit code 1 when the daemon returned an error, so
-    the failure actions (WIN-052) apply. Started outside the SCM the flag is
+    or a service-specific exit code 1 when the daemon (or anything after
+    the handler registered, such as starting the runtime) failed, so the
+    failure actions (WIN-052) apply and the SCM never sees a service stuck
+    starting. Started outside the SCM the flag is
     an error, not a foreground run. `--service` is refused off Windows.
 
     Depends on WIN-025.
@@ -741,7 +743,9 @@ class WindowsServiceUninstall(Requirement):
     firewall rule (WIN-047). `%ProgramData%\\tetron` (identity, networks,
     logs) is kept and its path printed, as on Linux and macOS. The installed
     program files are removed, except the running executable when uninstall
-    runs from the install directory itself; its path is printed then.
+    runs from the install directory itself; its path is printed then. The
+    rule and file cleanup also runs when the service is already gone, so a
+    second uninstall from another copy removes what the first left.
 
     Depends on WIN-051.
     """

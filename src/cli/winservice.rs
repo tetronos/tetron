@@ -82,20 +82,9 @@ fn run_service() -> Result<()> {
     let handle = service_control_handler::register(SERVICE_NAME, handler)
         .context("registering the service control handler")?;
     let _ = STATUS.set(handle);
-    handle.set_service_status(status(
-        ServiceState::Running,
-        ServiceExitCode::Win32(0),
-        Duration::ZERO,
-    ))?;
-
-    let runtime = tokio::runtime::Runtime::new().context("starting the tokio runtime")?;
-    let result = runtime.block_on(async {
-        let stats = std::sync::Arc::new(tetron::stats::ForwardMetrics::default());
-        stats.spawn_logger(token.clone());
-        tetron::daemon::run_daemon(token, stats).await
-    });
-    runtime.shutdown_timeout(Duration::from_secs(10));
-
+    // Every path after registration ends in a reported `Stopped`, so the SCM
+    // never sees a service stuck starting; an error exit lets WIN-052 restart.
+    let result = run_registered(handle, token);
     let exit = match &result {
         Ok(()) => ServiceExitCode::Win32(0),
         Err(e) => {
@@ -105,6 +94,26 @@ fn run_service() -> Result<()> {
     };
     handle.set_service_status(status(ServiceState::Stopped, exit, Duration::ZERO))?;
     Ok(())
+}
+
+/// Report `Running` and run the daemon until its token is cancelled.
+fn run_registered(
+    handle: service_control_handler::ServiceStatusHandle,
+    token: CancellationToken,
+) -> Result<()> {
+    handle.set_service_status(status(
+        ServiceState::Running,
+        ServiceExitCode::Win32(0),
+        Duration::ZERO,
+    ))?;
+    let runtime = tokio::runtime::Runtime::new().context("starting the tokio runtime")?;
+    let result = runtime.block_on(async {
+        let stats = std::sync::Arc::new(tetron::stats::ForwardMetrics::default());
+        stats.spawn_logger(token.clone());
+        tetron::daemon::run_daemon(token, stats).await
+    });
+    runtime.shutdown_timeout(Duration::from_secs(10));
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -304,15 +313,17 @@ pub(crate) fn restart() -> Result<()> {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn uninstall() -> Result<()> {
-    let Some(s) = open(ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::DELETE)?
-    else {
-        println!("Service not installed.");
-        return Ok(());
-    };
-    stop_and_wait(&s)?;
-    s.delete().context("deleting service tetron")?;
-    drop(s);
-    println!("Removed Windows service 'tetron'.");
+    // A missing service still gets the cleanup below: an earlier uninstall
+    // run from the installed executable leaves that file behind.
+    match open(ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::DELETE)? {
+        Some(s) => {
+            stop_and_wait(&s)?;
+            s.delete().context("deleting service tetron")?;
+            drop(s);
+            println!("Removed Windows service 'tetron'.");
+        }
+        None => println!("Service not installed."),
+    }
     if let Err(e) = tetron::tun::remove_all_echo_rules() {
         eprintln!("warning: could not remove tetron firewall rules: {e:#}");
     }
