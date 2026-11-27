@@ -40,6 +40,9 @@ from libspec import Requirement
 #     (install location), WIN-051/052 (install and lifecycle commands,
 #     failure actions), WIN-053/054 (privilege and logs, mostly in place),
 #     WIN-055 (uninstall).
+#   WIN-080..083 (packaging) need WIN-056 (`tetron install` places the
+#     files). Order: WIN-080/081 (release artifact), WIN-082 (install.ps1),
+#     WIN-083 (version sites, a check).
 # ==========================================================================
 
 
@@ -767,3 +770,68 @@ class WindowsServiceInstallLocation(Requirement):
     Depends on WIN-040.
     """
     req_id = "WIN-056"
+
+
+class WindowsReleaseArtifact(Requirement):
+    """REQUIREMENT-ID: WIN-080
+
+    `release.yml` and `nightly.yml` build `x86_64-pc-windows-msvc` on a
+    Windows runner (`cargo build --release --locked`, same features as the
+    other release builds) and publish `tetron-x86_64-windows.zip` holding
+    `tetron.exe`, `wintun.dll` (amd64), `LICENSE`, and Wintun's own license,
+    plus `tetron-x86_64-windows.zip.sha256`.
+
+    - The job runs only when the repository variable `WINDOWS_RELEASE` is
+      `true`, so turning Windows releases on is a deliberate act, not a side
+      effect of the next tag.
+    - The zip's `tetron.exe` answers `--version` on the runner before
+      upload.
+
+    Depends on WIN-001 and WIN-081.
+    """
+    req_id = "WIN-080"
+
+
+class WintunRedistribution(Requirement):
+    """REQUIREMENT-ID: WIN-081
+
+    `wintun.dll` is the prebuilt, signed DLL from the official Wintun
+    distribution, redistributed unmodified under its own license, never built
+    from source. The release job downloads one pinned version and fails
+    unless the archive's SHA-256 equals the pinned value; it ships Wintun's
+    license file from the same archive beside the DLL.
+
+    Depends on nothing.
+    """
+    req_id = "WIN-081"
+
+
+class WindowsInstallScript(Requirement):
+    """REQUIREMENT-ID: WIN-082
+
+    `contrib/install-tetron.ps1`, served by Pages as `install.ps1` beside
+    `install.sh`, installs tetron on Windows from an elevated PowerShell:
+    it downloads the release zip and its `.sha256` (latest release, or a
+    `-Version` tag), refuses to continue unless the hashes match, extracts to
+    a fresh temporary folder, runs `tetron.exe install` from there (which
+    copies into `%ProgramFiles%\\tetron` and starts the service, WIN-051 and
+    WIN-056), adds `%ProgramFiles%\\tetron` to the machine `PATH` if absent,
+    and removes the temporary folder. It refuses to run unelevated. It is a
+    public trust artifact: every step is commented for a reader deciding
+    whether to run it, and the comments describe only what the script does.
+
+    Depends on WIN-080 and WIN-056.
+    """
+    req_id = "WIN-082"
+
+
+class WindowsVersionSites(Requirement):
+    """REQUIREMENT-ID: WIN-083
+
+    Windows packaging adds no version site: the zip carries the version only
+    through the tag and the binary itself, so `contrib/bump-version.sh` and
+    CON-REL01 are unchanged.
+
+    Depends on WIN-080.
+    """
+    req_id = "WIN-083"

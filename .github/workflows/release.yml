@@ -2,7 +2,8 @@ name: Release
 
 # Continuous releases: pushing a tag like `v0.1.0` cuts a release with Linux
 # binaries (macOS/Android disabled — see CI-002). Can also be run manually
-# from the Actions tab. Windows support: TODO.
+# from the Actions tab. Windows (WIN-080) builds only when the repository
+# variable WINDOWS_RELEASE is "true".
 on:
   push:
     tags:
@@ -305,3 +306,45 @@ jobs:
           files: |
             ${{ matrix.name }}
             ${{ matrix.name }}.sha256
+
+  # WIN-080: Windows zip (tetron.exe, wintun.dll, licenses). Runs only when the
+  # repository variable WINDOWS_RELEASE is "true" (Settings > Secrets and
+  # variables > Actions > Variables), so publishing Windows builds is a
+  # deliberate switch, not a side effect of the next tag.
+  build-windows:
+    needs: create-release
+    if: vars.WINDOWS_RELEASE == 'true'
+    permissions:
+      contents: write
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "release-x86_64-pc-windows-msvc"
+          cache-on-failure: true
+
+      - name: Build binary
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc --features tor,veilid
+
+      - name: Package for release
+        shell: pwsh
+        run: ./contrib/package-windows.ps1 -Binary target/x86_64-pc-windows-msvc/release/tetron.exe
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ needs.create-release.outputs.tag }}
+          files: |
+            tetron-x86_64-windows.zip
+            tetron-x86_64-windows.zip.sha256

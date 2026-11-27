@@ -6,6 +6,9 @@ name: Pages
 # so the short command
 #   curl -fsSL https://tetronos.github.io/tetron/install.sh | bash
 # always serves the installer that is on main. One copy in git, never stale.
+# The Windows installer is served the same way as /install.ps1, from
+# contrib/install-tetron.ps1 (WIN-082):
+#   irm https://tetronos.github.io/tetron/install.ps1 | iex
 # Pull requests build only (to check the site still builds); pushes to main
 # build and deploy. Needs Settings > Pages > Source: GitHub Actions.
 
@@ -37,6 +40,10 @@ jobs:
         run: |
           sudo install -m 644 contrib/install-tetron-suite.sh _site/install.sh
           head -1 _site/install.sh | grep -q '^#!' || { echo "install.sh is not a script"; exit 1; }
+      - name: Add install.ps1 (the Windows installer from this commit)
+        run: |
+          sudo install -m 644 contrib/install-tetron.ps1 _site/install.ps1
+          grep -q 'tetron-x86_64-windows.zip' _site/install.ps1 || { echo "install.ps1 is not the installer"; exit 1; }
           ls -la _site
       - uses: actions/upload-pages-artifact@v3
         with:
