@@ -90,6 +90,10 @@ chmod +x tetron
 sudo install tetron /usr/local/bin/tetron
 sudo tetron install
 
+# Windows 10/11 (x86_64), from an elevated PowerShell. Only once a release
+# carries tetron-x86_64-windows.zip; until then build from source.
+#   irm https://tetronos.github.io/tetron/install.ps1 | iex
+
 # Install the Web UI.
 curl -Lo tetron-webui https://github.com/tetronos/tetron-webui/releases/latest/download/tetron-webui-linux-x86_64
 chmod +x tetron-webui

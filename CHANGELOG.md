@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Windows 10 and 11 (x86_64): tetron runs as a Windows service (`tetron install` from an elevated terminal), with one Wintun adapter per network, IPv4 and IPv6 overlay addresses, standby/resume, and `install.ps1` for a one-line install. Configuration and keys live in `%ProgramData%\tetron`, readable only by SYSTEM and Administrators. Not yet on Windows: `set-operator`, the `--config-dir`/`--log-dir`/`--socket-path` install flags, and the self-capture route mitigation.
+
 ### Fixed
 
 - `tetron create --subnet` no longer changes the node's default subnet when the create is refused for overlapping the local network, or when `--force` was needed to override an overlap. Before, such a create left that range as the default and the daemon refused to start after its next restart until `tetron config unset subnet` was run.
