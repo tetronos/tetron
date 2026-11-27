@@ -630,12 +630,15 @@ pub(crate) fn require_root() -> Result<()> {
     Ok(())
 }
 
-/// WIN-001: the token-elevation check is not implemented yet.
+/// WIN-025: LocalSystem or an elevated Administrator stands in for root.
 #[cfg(windows)]
 pub(crate) fn require_root() -> Result<()> {
-    anyhow::bail!(
-        "this command manages the system service and requires an elevated (Administrator) terminal; the elevation check is not yet supported on Windows"
-    )
+    if !tetron::windows_identity::is_privileged_process() {
+        anyhow::bail!(
+            "this command manages the system service and requires an elevated (Administrator) terminal"
+        );
+    }
+    Ok(())
 }
 
 /// Full version string: the crate version plus the git short SHA stamped in by

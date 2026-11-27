@@ -41,3 +41,5 @@ pub mod transport;
 pub mod tun;
 #[cfg(unix)]
 pub mod userdb;
+#[cfg(windows)]
+pub mod windows_identity;

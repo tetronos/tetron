@@ -21,6 +21,11 @@ from libspec import Requirement
 #   WIN-010 needs WIN-001 (the Windows variant must compile) and nothing else.
 #     It changes no behavior; the named-pipe server (later) constructs the
 #     Windows variant.
+#   WIN-020..025 (config tree and protected files) need WIN-001. Commit order:
+#     WIN-025 (token helpers + elevation check) first, since WIN-021 and
+#     WIN-022 decide the trusted owner from the current token; then WIN-020
+#     (location), WIN-021 (protected directory), WIN-022 (protected writes),
+#     WIN-023 and WIN-024 (audits that pin down existing behavior).
 # ==========================================================================
 
 
@@ -135,3 +140,28 @@ class IpcCaller(Requirement):
     Depends on WIN-001.
     """
     req_id = "WIN-010"
+
+
+class WindowsTokenIdentity(Requirement):
+    """REQUIREMENT-ID: WIN-025
+
+    A Windows-only `windows_identity` module answers two questions about the
+    current process token:
+    `current_user_sid() -> Option<String>` (string SID of the token user) and
+    `is_current_process_elevated_admin() -> bool` (the token is a member of
+    `BUILTIN\\Administrators` with that group enabled, i.e. elevated, checked
+    with `CheckTokenMembership` on an identification-level duplicate).
+
+    - The privilege check behind `require_root`/`check_root` gets its real
+      Windows arm: LocalSystem (`S-1-5-18`) or an elevated Administrator
+      passes; anything else fails with "requires an elevated (Administrator)
+      terminal". This replaces WIN-001's unconditional refusal.
+    - Every Win32 handle and buffer is released on every path (owned-handle
+      guards, `LocalFree`); a failed call is "not privileged", never a panic.
+    - Windows-only tests: the SID is a non-empty `S-1-` string; the elevation
+      answer matches `whoami /groups` reporting the High Mandatory Level.
+
+    Depends on WIN-001.
+    """
+    req_id = "WIN-025"
+

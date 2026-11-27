@@ -366,14 +366,15 @@ fn check_root() {
     }
 }
 
-/// WIN-001: the token-elevation check is not implemented yet, so commands
-/// that need an elevated terminal refuse on Windows.
+/// WIN-025: LocalSystem or an elevated Administrator stands in for root.
 #[cfg(windows)]
 fn check_root() {
-    eprintln!(
-        "tetron requires an elevated (Administrator) terminal; the elevation check is not yet supported on Windows."
-    );
-    std::process::exit(1);
+    if !tetron::windows_identity::is_privileged_process() {
+        eprintln!(
+            "tetron requires an elevated (Administrator) terminal. Run it from \"Run as administrator\"."
+        );
+        std::process::exit(1);
+    }
 }
 
 /// Guard that must outlive the process: the file appender's `WorkerGuard`
