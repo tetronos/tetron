@@ -378,8 +378,15 @@ class NamedPipeServer(Requirement):
     - The first instance is created with `first_pipe_instance(true)`, so a
       name already taken (another daemon, or a squatter) is a start-up error
       instead of a shared pipe. `reject_remote_clients(true)` on every
-      instance. One pending instance always exists: the next one is created
-      before the connected one is handed to its task.
+      instance. The name stays held for the daemon's whole life, since once
+      every instance is closed it is free and a standard user could create
+      the first instance with their own descriptor: two instances listen at
+      once, a connected one is handed off only while the other slot (or its
+      fresh replacement) listens, and an instance whose connect fails (a
+      client can force that by opening and closing at once) is dropped only
+      after a replacement exists, otherwise disconnected and kept. The one
+      remaining gap needs instance creation itself to fail twice in a row with
+      no client connected, which a standard user can not cause.
     - Pipe security descriptor: owner stamped `SYSTEM` (service) or
       `Administrators` (elevated foreground daemon), so WIN-031's check has a
       value that does not move with local policy; protected DACL: `SYSTEM`
@@ -397,8 +404,9 @@ class NamedPipeServer(Requirement):
       IPC-ADMISSION-003 backoff (a gated `select!` branch, never an inline
       sleep) and recreates the pending instance.
     - Tests (Windows): a client round-trips a request; a standard user can
-      not create an instance of the daemon's pipe (checked live on the test
-      VM with a standard account).
+      not create an instance of the daemon's pipe, and can not take the name
+      by racing open/close against first-instance creation (both checked
+      live on the test VM with a standard account).
 
     Depends on WIN-030, WIN-021 and WIN-025.
     """

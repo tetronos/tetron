@@ -269,8 +269,14 @@ async fn build_daemon(
 
 /// Serve IPC on the named pipe until the daemon-wide `token` is cancelled
 /// (WIN-032): the Windows counterpart of the Unix socket server below, with the
-/// same loop duties and admission (WIN-034). One pending instance always
-/// exists; the next is created before a connected one is handed to its task.
+/// same loop duties and admission (WIN-034).
+///
+/// The pipe name must stay held for the daemon's whole life: once every
+/// instance is closed the name is free, and a standard user could create the
+/// first instance with their own descriptor. So two instances listen at once,
+/// a connected one is only handed off while the other slot (or its freshly
+/// created replacement) still listens, and a broken one is only dropped once a
+/// replacement exists; until then it is disconnected and kept.
 #[cfg(windows)]
 async fn serve_ipc(
     daemon: &Arc<MeshManager>,
@@ -281,52 +287,55 @@ async fn serve_ipc(
     use tokio::net::windows::named_pipe::NamedPipeServer;
 
     let name = ipc::socket_path();
-    let mut pending: Option<NamedPipeServer> = Some(
-        crate::windows_security::create_pipe_instance(&name, true).with_context(|| {
-            format!(
-                "cannot claim IPC pipe {}; another tetron daemon (or another program) holds it",
-                name.display()
-            )
-        })?,
-    );
+    let first = crate::windows_security::create_pipe_instance(&name, true).with_context(|| {
+        format!(
+            "cannot claim IPC pipe {}; another tetron daemon (or another program) holds it",
+            name.display()
+        )
+    })?;
+    let second = crate::windows_security::create_pipe_instance(&name, false)?;
+    let mut slots: [Option<NamedPipeServer>; 2] = [Some(first), Some(second)];
     tracing::info!(pipe = %name.display(), "IPC named pipe listening");
 
     // IPC-ADMISSION-002: handler slots, sized once at start.
     let ipc_cfg = config::load().map(|c| c.ipc).unwrap_or_default();
-    let slots = IpcSlots::new(
+    let admission = IpcSlots::new(
         ipc_cfg.max_clients_or_default(),
         ipc_cfg.reserved_clients_or_default(),
     );
 
-    // IPC-ADMISSION-003: a failed connect or instance creation pauses through a
-    // gated branch, never an inline sleep; the pause also recreates a missing
-    // pending instance.
+    // IPC-ADMISSION-003: errors pause through a gated branch, never an inline
+    // sleep; the pause also refills empty slots.
     let mut accept_errors: u32 = 0;
     let mut accept_repeats: u32 = 0;
     let mut accept_paused_until: Option<tokio::time::Instant> = None;
 
+    async fn listen(slot: &Option<NamedPipeServer>) -> std::io::Result<()> {
+        match slot {
+            Some(p) => p.connect().await,
+            None => std::future::pending().await,
+        }
+    }
+
     loop {
-        let connect = async {
-            match &pending {
-                Some(p) => p.connect().await,
-                None => std::future::pending().await,
-            }
-        };
-        tokio::select! {
+        let (connect0, connect1) = (listen(&slots[0]), listen(&slots[1]));
+        let (i, result) = tokio::select! {
             _ = tokio::time::sleep_until(accept_paused_until.unwrap_or_else(tokio::time::Instant::now)),
                 if accept_paused_until.is_some() => {
                 accept_paused_until = None;
-                if pending.is_none() {
+                for slot in slots.iter_mut().filter(|s| s.is_none()) {
                     match crate::windows_security::create_pipe_instance(&name, false) {
-                        Ok(p) => pending = Some(p),
+                        Ok(p) => *slot = Some(p),
                         Err(e) => {
                             tracing::warn!(error = %e, "IPC pipe instance creation failed");
                             accept_errors = accept_errors.saturating_add(1);
                             accept_paused_until =
                                 Some(tokio::time::Instant::now() + accept_backoff(accept_errors));
+                            break;
                         }
                     }
                 }
+                continue;
             }
             _ = token.cancelled() => {
                 tracing::info!("daemon shutting down");
@@ -335,65 +344,75 @@ async fn serve_ipc(
             }
             Some(net) = promote_rx.recv() => {
                 daemon.promote_to_coordinator(&net).await;
+                continue;
             }
             Some(net) = left_rx.recv() => {
                 daemon.handle_removed_from_network(&net).await;
+                continue;
             }
-            result = connect, if accept_paused_until.is_none() => {
-                let Some(connected) = pending.take() else { continue };
-                match result {
-                    Ok(()) => {
-                        if accept_errors > 0 {
-                            if accept_repeats > 0 {
-                                tracing::warn!(repeats = accept_repeats, "IPC accept recovered");
-                            }
-                            accept_errors = 0;
-                            accept_repeats = 0;
-                        }
-                        match crate::windows_security::create_pipe_instance(&name, false) {
-                            Ok(p) => pending = Some(p),
-                            Err(e) => {
-                                tracing::warn!(error = %e, "IPC pipe instance creation failed");
-                                accept_errors = accept_errors.saturating_add(1);
-                                accept_paused_until =
-                                    Some(tokio::time::Instant::now() + accept_backoff(accept_errors));
-                            }
-                        }
-                        // WIN-034: the reserve needs the caller before any read;
-                        // only asked once the general pool is full.
-                        let permit = slots.try_admit(|| {
-                            may_use_reserve(pipe_caller(&connected).as_ref(), || None)
-                        });
-                        let Some(permit) = permit else {
-                            tracing::debug!("IPC client turned away: no free handler slot");
-                            send_busy_reply_pipe(&connected);
-                            continue;
-                        };
-                        let daemon = daemon.clone();
-                        tokio::spawn(async move {
-                            let _permit = permit;
-                            if let Err(e) =
-                                handle_ipc_client(connected, pipe_caller, &daemon).await
-                            {
-                                tracing::debug!(error = %e, "IPC client error");
-                            }
-                        });
-                    }
-                    Err(e) => {
-                        // The instance is broken; drop it and recreate after a pause.
-                        drop(connected);
-                        if accept_errors == 0 {
-                            tracing::warn!(error = %e, "IPC accept error");
-                        } else {
-                            accept_repeats += 1;
-                        }
-                        accept_errors = accept_errors.saturating_add(1);
-                        accept_paused_until =
-                            Some(tokio::time::Instant::now() + accept_backoff(accept_errors));
+            r = connect0, if accept_paused_until.is_none() => (0, r),
+            r = connect1, if accept_paused_until.is_none() => (1, r),
+        };
+
+        if let Err(e) = result {
+            // Never drop the instance until a replacement listens: create one
+            // first; if that fails, disconnect and keep the old one.
+            match crate::windows_security::create_pipe_instance(&name, false) {
+                Ok(p) => slots[i] = Some(p),
+                Err(ce) => {
+                    tracing::warn!(error = %ce, "IPC pipe instance creation failed");
+                    if let Some(p) = &slots[i] {
+                        let _ = p.disconnect();
                     }
                 }
             }
+            if accept_errors == 0 {
+                tracing::warn!(error = %e, "IPC accept error");
+            } else {
+                accept_repeats += 1;
+            }
+            accept_errors = accept_errors.saturating_add(1);
+            accept_paused_until = Some(tokio::time::Instant::now() + accept_backoff(accept_errors));
+            continue;
         }
+
+        if accept_errors > 0 {
+            if accept_repeats > 0 {
+                tracing::warn!(repeats = accept_repeats, "IPC accept recovered");
+            }
+            accept_errors = 0;
+            accept_repeats = 0;
+        }
+        let Some(connected) = slots[i].take() else {
+            continue;
+        };
+        // The other slot still listens while this one is replaced, so the name
+        // stays held; a failed creation is retried after a pause.
+        match crate::windows_security::create_pipe_instance(&name, false) {
+            Ok(p) => slots[i] = Some(p),
+            Err(e) => {
+                tracing::warn!(error = %e, "IPC pipe instance creation failed");
+                accept_errors = accept_errors.saturating_add(1);
+                accept_paused_until =
+                    Some(tokio::time::Instant::now() + accept_backoff(accept_errors));
+            }
+        }
+        // WIN-034: the reserve needs the caller before any read; only asked
+        // once the general pool is full.
+        let permit =
+            admission.try_admit(|| may_use_reserve(pipe_caller(&connected).as_ref(), || None));
+        let Some(permit) = permit else {
+            tracing::debug!("IPC client turned away: no free handler slot");
+            send_busy_reply_pipe(&connected);
+            continue;
+        };
+        let daemon = daemon.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            if let Err(e) = handle_ipc_client(connected, pipe_caller, &daemon).await {
+                tracing::debug!(error = %e, "IPC client error");
+            }
+        });
     }
 }
 
