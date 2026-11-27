@@ -77,3 +77,6 @@ jobs:
 
       - name: Build
         run: cargo build --locked
+
+      - name: Stack reserve (WIN-002)
+        run: cargo test --locked --test windows_stack_reserve
