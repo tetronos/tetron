@@ -26,5 +26,14 @@ serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["net"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 
+[target.'cfg(windows)'.dependencies]
+# Named-pipe client: exact access rights and the pipe owner check (WIN-031).
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+] }
+
 [dev-dependencies]
 rand = "0.10"

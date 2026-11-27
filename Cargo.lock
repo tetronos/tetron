@@ -4286,6 +4286,7 @@ dependencies = [
  "serde",
  "tokio",
  "tokio-util",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

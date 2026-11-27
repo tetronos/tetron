@@ -6,8 +6,11 @@ use anyhow::{Context, Result};
 use bytes::{Bytes, BytesMut};
 use iroh::EndpointId;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use tokio::io::{AsyncRead, AsyncWrite};
 #[cfg(unix)]
 use tokio::net::UnixStream;
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::NamedPipeClient;
 use tokio_util::codec::{Decoder, Encoder, Framed, LengthDelimitedCodec};
 
 use crate::{GroupMode, TransportMode};
@@ -652,14 +655,27 @@ pub fn epoch_check(protocol_epoch: &str, daemon_version: &str) -> EpochCheck {
     }
 }
 
-/// The byte stream under the IPC framing. `UnixStream` on Unix; a named-pipe
-/// client on Windows (WIN-001), where the transport is not implemented yet.
+/// The client's byte stream under the IPC framing: `UnixStream` on Unix, a
+/// named-pipe client on Windows (WIN-030).
 #[cfg(unix)]
 pub type IpcStream = UnixStream;
 #[cfg(windows)]
-pub type IpcStream = tokio::net::windows::named_pipe::NamedPipeClient;
+pub type IpcStream = NamedPipeClient;
 
+/// A client connection, as [`connect`] returns it.
 pub type IpcFramed = Framed<IpcStream, MsgpackCodec<IpcMessage>>;
+
+/// String SID of `NT AUTHORITY\SYSTEM`, the Windows service account.
+pub const LOCAL_SYSTEM_SID: &str = "S-1-5-18";
+/// String SID of `BUILTIN\Administrators`.
+pub const ADMINISTRATORS_SID: &str = "S-1-5-32-544";
+
+/// Whether `sid` may own the daemon's pipe (WIN-031) or anything in its config
+/// tree (WIN-021): `SYSTEM` or `Administrators`, which a standard user's token
+/// can not stamp on an object it creates.
+pub fn is_trusted_owner_sid(sid: &str) -> bool {
+    sid == LOCAL_SYSTEM_SID || sid == ADMINISTRATORS_SID
+}
 
 /// `TETRON_SOCKET_PATH` overrides the resolved path on every platform
 /// (PORTABILITY-003, same override-then-fixed-defaults shape as
@@ -669,11 +685,15 @@ pub type IpcFramed = Framed<IpcStream, MsgpackCodec<IpcMessage>>;
 /// path themselves) picks up an override with no changes needed on their
 /// side. An install that never sets it gets the exact same path as
 /// before this existed.
+///
+/// On Windows this is a pipe name, `\\.\pipe\tetron` by default (WIN-030).
 pub fn socket_path() -> PathBuf {
     if let Some(path) = std::env::var_os("TETRON_SOCKET_PATH") {
         return PathBuf::from(path);
     }
-    if cfg!(target_os = "macos") {
+    if cfg!(windows) {
+        PathBuf::from(r"\\.\pipe\tetron")
+    } else if cfg!(target_os = "macos") {
         PathBuf::from("/var/run/tetron.sock")
     } else {
         PathBuf::from("/var/run/tetron/tetron.sock")
@@ -689,22 +709,172 @@ pub async fn connect() -> Result<IpcFramed> {
     Ok(Framed::new(stream, MsgpackCodec::new()))
 }
 
-/// WIN-001: the daemon IPC transport is not implemented on Windows yet.
+/// Connect to the daemon's named pipe (WIN-031). Retries while every instance
+/// is busy, then refuses a pipe not owned by `SYSTEM` or `Administrators`
+/// before sending anything: any process can create a pipe under a free name,
+/// so while the daemon is stopped a standard user could otherwise collect the
+/// next client's requests.
 #[cfg(windows)]
 pub async fn connect() -> Result<IpcFramed> {
-    anyhow::bail!("daemon IPC is not yet supported on Windows")
+    connect_to(&socket_path()).await
 }
 
-pub fn framed(stream: IpcStream) -> IpcFramed {
+/// [`connect`] to an explicit pipe name.
+#[cfg(windows)]
+pub async fn connect_to(name: &std::path::Path) -> Result<IpcFramed> {
+    use std::time::Duration;
+    const BUSY_WAIT: Duration = Duration::from_secs(5);
+    const ERROR_FILE_NOT_FOUND: i32 = 2;
+    const ERROR_PATH_NOT_FOUND: i32 = 3;
+    const ERROR_PIPE_BUSY: i32 = 231;
+    let deadline = tokio::time::Instant::now() + BUSY_WAIT;
+    let stream = loop {
+        match pipe::open_client(name) {
+            Ok(stream) => break stream,
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+                if tokio::time::Instant::now() >= deadline {
+                    anyhow::bail!(
+                        "daemon pipe {} stayed busy for {BUSY_WAIT:?}; try again",
+                        name.display()
+                    );
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(e)
+                if matches!(
+                    e.raw_os_error(),
+                    Some(ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND)
+                ) =>
+            {
+                return Err(e).context(
+                    "daemon not running — start it from an elevated terminal with: tetron daemon",
+                );
+            }
+            Err(e) => return Err(e).with_context(|| format!("connecting to {}", name.display())),
+        }
+    };
+    let owner = pipe::owner_sid(&stream)?;
+    anyhow::ensure!(
+        is_trusted_owner_sid(&owner),
+        "refusing daemon pipe {} owned by {owner}, not SYSTEM or Administrators",
+        name.display()
+    );
+    Ok(framed(stream))
+}
+
+/// Win32 glue for the named-pipe client (WIN-031).
+#[cfg(windows)]
+mod pipe {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::AsRawHandle;
+    use std::path::Path;
+
+    use anyhow::Result;
+    use tokio::net::windows::named_pipe::NamedPipeClient;
+    use windows_sys::Win32::Foundation::{GENERIC_READ, INVALID_HANDLE_VALUE, LocalFree};
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSidToStringSidW, GetSecurityInfo, SE_KERNEL_OBJECT,
+    };
+    use windows_sys::Win32::Security::OWNER_SECURITY_INFORMATION;
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_FLAG_OVERLAPPED, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, OPEN_EXISTING,
+        SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT,
+    };
+
+    /// Open `name` with exactly the rights the daemon grants every
+    /// authenticated user (WIN-032): no `FILE_APPEND_DATA`, which on a pipe is
+    /// the right to create server instances. Identification-level QoS lets the
+    /// daemon learn who is calling, never act as them.
+    pub(super) fn open_client(name: &Path) -> std::io::Result<NamedPipeClient> {
+        let wide: Vec<u16> = name
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: `wide` is NUL-terminated; null security attributes and
+        // template are allowed for OPEN_EXISTING.
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                GENERIC_READ | FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES,
+                0,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: an overlapped pipe handle this function owns; tokio takes it.
+        unsafe { NamedPipeClient::from_raw_handle(handle) }
+    }
+
+    /// The pipe object's owner as a string SID, read with the `READ_CONTROL`
+    /// that `GENERIC_READ` carries, so it works from any account.
+    pub(super) fn owner_sid(pipe: &NamedPipeClient) -> Result<String> {
+        let mut owner = std::ptr::null_mut();
+        let mut sd = std::ptr::null_mut();
+        // SAFETY: an open pipe handle; `owner` points into `sd`, freed below
+        // after its last use.
+        let status = unsafe {
+            GetSecurityInfo(
+                pipe.as_raw_handle(),
+                SE_KERNEL_OBJECT,
+                OWNER_SECURITY_INFORMATION,
+                &mut owner,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut sd,
+            )
+        };
+        anyhow::ensure!(
+            status == 0 && !owner.is_null() && !sd.is_null(),
+            "cannot read the owner of the daemon pipe (Win32 error {status})"
+        );
+        let mut text = std::ptr::null_mut();
+        // SAFETY: `owner` is a valid SID inside `sd`.
+        let ok = unsafe { ConvertSidToStringSidW(owner, &mut text) } != 0 && !text.is_null();
+        let sid = ok.then(|| {
+            let mut len = 0;
+            // SAFETY: on success `text` is NUL-terminated.
+            unsafe {
+                while *text.add(len) != 0 {
+                    len += 1;
+                }
+                String::from_utf16_lossy(std::slice::from_raw_parts(text, len))
+            }
+        });
+        // SAFETY: both were LocalAlloc'd by the calls above.
+        unsafe {
+            if !text.is_null() {
+                LocalFree(text.cast());
+            }
+            LocalFree(sd);
+        }
+        sid.ok_or_else(|| anyhow::anyhow!("cannot format the daemon pipe owner SID"))
+    }
+}
+
+/// Frame any IPC byte stream (WIN-030): a client connection, the Unix socket
+/// the daemon accepted, or a named-pipe server instance.
+pub fn framed<S: AsyncRead + AsyncWrite>(stream: S) -> Framed<S, MsgpackCodec<IpcMessage>> {
     Framed::new(stream, MsgpackCodec::new())
 }
 
-pub async fn send(framed: &mut IpcFramed, msg: IpcMessage) -> Result<()> {
+pub async fn send<S: AsyncRead + AsyncWrite + Unpin>(
+    framed: &mut Framed<S, MsgpackCodec<IpcMessage>>,
+    msg: IpcMessage,
+) -> Result<()> {
     use futures::SinkExt;
     framed.send(msg).await
 }
 
-pub async fn recv(framed: &mut IpcFramed) -> Result<IpcMessage> {
+pub async fn recv<S: AsyncRead + AsyncWrite + Unpin>(
+    framed: &mut Framed<S, MsgpackCodec<IpcMessage>>,
+) -> Result<IpcMessage> {
     use futures::StreamExt;
     framed.next().await.context("connection closed")?
 }
@@ -718,6 +888,16 @@ mod tests {
     /// `tetron` core's own `CONFIG_ENV_LOCK`, which this crate can't reach
     /// into directly since it's a separate crate).
     static SOCKET_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn only_system_and_administrators_may_own_the_pipe() {
+        // WIN-031
+        assert!(is_trusted_owner_sid("S-1-5-18"));
+        assert!(is_trusted_owner_sid("S-1-5-32-544"));
+        for sid in ["S-1-5-21-1-2-3-1001", "S-1-5-32-545", "S-1-1-0", ""] {
+            assert!(!is_trusted_owner_sid(sid), "{sid}");
+        }
+    }
 
     #[test]
     fn socket_path_override() {

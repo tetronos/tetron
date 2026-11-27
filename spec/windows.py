@@ -26,6 +26,10 @@ from libspec import Requirement
 #     WIN-022 decide the trusted owner from the current token; then WIN-020
 #     (location), WIN-021 (protected directory), WIN-022 (protected writes),
 #     WIN-023 and WIN-024 (audits that pin down existing behavior).
+#   WIN-030..035 (named-pipe IPC) need WIN-010 (Caller), WIN-021 (trusted
+#     owners) and WIN-025 (token helpers). Order: WIN-030 (generic framing,
+#     pipe name), WIN-031 (client), WIN-032 (server + pipe ACL), WIN-033
+#     (caller identity), WIN-034 (admission), WIN-035 (addon check, no code).
 # ==========================================================================
 
 
@@ -313,3 +317,53 @@ class WindowsTrustedConfigRead(Requirement):
     Depends on WIN-021.
     """
     req_id = "WIN-026"
+
+
+class IpcGenericFraming(Requirement):
+    """REQUIREMENT-ID: WIN-030
+
+    `tetron-proto`'s `framed`, `send` and `recv` are generic over any
+    `AsyncRead + AsyncWrite + Unpin` stream, so the daemon can frame a
+    `NamedPipeServer` (a different type from the client's `NamedPipeClient`)
+    with the same codec. `IpcFramed` stays the client alias
+    (`Framed<IpcStream, MsgpackCodec<IpcMessage>>`), so `tetron-webui` and
+    `tetron-systray` (which call `connect`/`send`/`recv`/`framed`) compile
+    unchanged. The wire format (4-byte BE length + msgpack) is unchanged.
+
+    - `socket_path()` on Windows is the pipe name `\\\\.\\pipe\\tetron`;
+      `TETRON_SOCKET_PATH` (PORTABILITY-003) overrides it with another pipe
+      name, on every platform as before.
+
+    Depends on WIN-001.
+    """
+    req_id = "WIN-030"
+
+
+class NamedPipeClient(Requirement):
+    """REQUIREMENT-ID: WIN-031
+
+    `tetron_proto::ipc::connect()` on Windows opens the pipe with exactly
+    `GENERIC_READ | FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES` (what WIN-032
+    grants Authenticated Users), overlapped, at `SECURITY_IDENTIFICATION`
+    quality of service (the daemon may identify the caller, never act as
+    them).
+
+    - `ERROR_PIPE_BUSY` (every instance taken) is retried every 50 ms for up
+      to 5 s, then reported; a missing pipe reports that the daemon is not
+      running.
+    - Before anything is sent, the client reads the pipe object's owner
+      (`GetSecurityInfo(SE_KERNEL_OBJECT)`, which needs only the
+      `READ_CONTROL` its `GENERIC_READ` carries) and refuses the pipe unless
+      the owner is `SYSTEM` or `Administrators`. Any process may create a
+      pipe under a free name, so while the daemon is stopped a standard user
+      could otherwise sit on `\\\\.\\pipe\\tetron` and collect requests
+      (invite secrets in `Join`). A standard user's token can not stamp either
+      owner. Reading the server process's token instead would fail for a
+      standard user against a LocalSystem service.
+    - The owner policy is the same pure `TrustedOwner::from_sid` the config
+      tree uses (WIN-021), unit-tested everywhere.
+
+    Depends on WIN-030 and WIN-021.
+    """
+    req_id = "WIN-031"
+
