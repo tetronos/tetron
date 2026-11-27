@@ -53,9 +53,9 @@ jobs:
       - name: Reconcile
         run: python3 reconcile.py
 
-  # WIN-001: the workspace must build and lint clean for Windows. Every
-  # not-yet-ported Windows arm returns an explicit error; tests join this job
-  # once they run on Windows.
+  # WIN-001: the workspace must build, lint and test clean for Windows. Every
+  # not-yet-ported Windows arm returns an explicit error. The config ACL tests
+  # (WIN-021/022) need an elevated token, which GitHub's Windows runners have.
   windows:
     runs-on: windows-latest
     steps:
@@ -78,5 +78,5 @@ jobs:
       - name: Build
         run: cargo build --locked
 
-      - name: Stack reserve (WIN-002)
-        run: cargo test --locked --test windows_stack_reserve
+      - name: Test (includes the WIN-002 stack reserve check)
+        run: cargo test --workspace --locked
