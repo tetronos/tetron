@@ -1,3 +1,8 @@
+// WIN-001: on Windows the system-service install/uninstall path is not
+// implemented yet, so its Unix helpers are unreachable there. Lifted when the
+// Windows service lands.
+#![cfg_attr(windows, allow(dead_code))]
+
 // The daemon's modules live in the `tetron` library crate (`src/lib.rs`) so
 // integration tests and benchmarks can reach them; this binary is the CLI/IPC
 // client built on top.
@@ -353,11 +358,22 @@ pub(crate) enum ConfigAction {
     },
 }
 
+#[cfg(unix)]
 fn check_root() {
     if unsafe { libc::geteuid() } != 0 {
         eprintln!("tetron requires root privileges to create TUN devices. Run with sudo.");
         std::process::exit(1);
     }
+}
+
+/// WIN-001: the token-elevation check is not implemented yet, so commands
+/// that need an elevated terminal refuse on Windows.
+#[cfg(windows)]
+fn check_root() {
+    eprintln!(
+        "tetron requires an elevated (Administrator) terminal; the elevation check is not yet supported on Windows."
+    );
+    std::process::exit(1);
 }
 
 /// Guard that must outlive the process: the file appender's `WorkerGuard`
@@ -781,14 +797,24 @@ async fn try_live_reload_path_preference() -> Result<()> {
 }
 
 /// Resolve a username to its UID, falling back to parsing a numeric UID.
+#[cfg(unix)]
 pub(crate) fn uid_for_user(user: &str) -> Option<u32> {
     tetron::userdb::user_uid(user).or_else(|| user.parse::<u32>().ok())
+}
+
+/// WIN-001: Windows has no UIDs; operator accounts are not supported there yet.
+#[cfg(windows)]
+pub(crate) fn uid_for_user(_user: &str) -> Option<u32> {
+    None
 }
 
 /// `tetron set-operator <user>`: authorize a local user to run mutating tetron
 /// commands without sudo (Tailscale's `--operator` model). The daemon enforces
 /// that this call itself comes from root.
 async fn cmd_set_operator(user: &str) -> Result<()> {
+    if cfg!(windows) {
+        anyhow::bail!("set-operator is not yet supported on Windows (user '{user}')");
+    }
     let uid = uid_for_user(user)
         .ok_or_else(|| anyhow::anyhow!("unknown user '{user}' (pass a valid username or UID)"))?;
     let mut stream = ipc::connect()

@@ -52,3 +52,28 @@ jobs:
 
       - name: Reconcile
         run: python3 reconcile.py
+
+  # WIN-001: the workspace must build and lint clean for Windows. Every
+  # not-yet-ported Windows arm returns an explicit error; tests join this job
+  # once they run on Windows.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "ci-windows"
+          cache-on-failure: true
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Build
+        run: cargo build --locked

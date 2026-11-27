@@ -20,9 +20,16 @@ pub(crate) const NIXOS_MARKER: &str = "/etc/NIXOS";
 /// The inner binary a Nix wrapper (makeWrapper) runs.
 const WRAPPED: &str = ".tetron-wrapped";
 
+#[cfg(unix)]
 fn is_executable(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+/// Windows has no execute bit; any regular file counts (WIN-001).
+#[cfg(windows)]
+fn is_executable(p: &Path) -> bool {
+    std::fs::metadata(p).is_ok_and(|m| m.is_file())
 }
 
 /// A profile link to tetron: absolute, outside `store`, executable, and
@@ -121,7 +128,8 @@ pub(crate) fn store_only_warning(exe: &Path) -> String {
     )
 }
 
-#[cfg(test)]
+// Nix store layouts, execute bits and symlinks: Unix only.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;

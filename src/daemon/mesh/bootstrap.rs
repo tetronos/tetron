@@ -267,10 +267,23 @@ async fn build_daemon(
     Ok(daemon)
 }
 
+/// WIN-001: the named-pipe IPC server is not implemented on Windows yet, so
+/// the daemon refuses to run there rather than run unreachable.
+#[cfg(windows)]
+async fn serve_ipc(
+    _daemon: &Arc<MeshManager>,
+    _promote_rx: mpsc::Receiver<String>,
+    _left_rx: mpsc::Receiver<String>,
+    _token: CancellationToken,
+) -> Result<()> {
+    anyhow::bail!("the daemon IPC server is not yet supported on Windows")
+}
+
 /// Bind the IPC Unix socket and serve client requests until the daemon-wide
 /// `token` is cancelled. On shutdown, put the VPN on standby (revert DNS, drop
 /// connections, bring the TUN down) and remove the socket file. Each request is
 /// handled on its own task so a slow client can't block the accept loop.
+#[cfg(unix)]
 async fn serve_ipc(
     daemon: &Arc<MeshManager>,
     mut promote_rx: mpsc::Receiver<String>,
@@ -380,6 +393,7 @@ async fn serve_ipc(
 /// by reaching the socket — every mutating request is authorized per-connection
 /// in `check_authorized` via `SO_PEERCRED` (root or the configured operator
 /// UID), Tailscale's model — so the file mode only has to permit the connect().
+#[cfg(unix)]
 fn set_socket_permissions(path: &std::path::Path) {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
@@ -415,6 +429,7 @@ fn truncate_decode_error(s: &str) -> String {
 /// PROTO-WIRE-001: the reply text for a request this daemon cannot decode:
 /// names this daemon's version and protocol epoch so the client can tell
 /// which side to upgrade, then the decode error. Bounded as a whole.
+#[cfg_attr(not(unix), allow(dead_code))] // WIN-001: used by the Unix IPC server only, for now
 fn undecodable_request_message(err: &str) -> String {
     truncate_decode_error(&format!(
         "request not supported by this daemon (tetron {}, protocol {}): {err}",
@@ -430,6 +445,7 @@ fn undecodable_request_message(err: &str) -> String {
 /// closed". Best-effort: the other common cause of a decode failure is a
 /// client that has already gone away, so the reply send is allowed to fail
 /// silently.
+#[cfg(unix)]
 async fn handle_ipc_client(stream: UnixStream, daemon: &Arc<MeshManager>) -> Result<()> {
     let peer_cred = stream.peer_cred().ok().map(|c| (c.uid(), c.gid()));
     let mut framed = ipc::framed(stream);
@@ -466,6 +482,7 @@ async fn handle_ipc_client(stream: UnixStream, daemon: &Arc<MeshManager>) -> Res
 /// `consecutive_errors` accept failures in a row: none for zero, then 50 ms
 /// doubling to a 1 second cap. Out of file descriptors, accept fails at once
 /// every time, so without a pause the loop spins and floods the journal.
+#[cfg_attr(not(unix), allow(dead_code))] // WIN-001: used by the Unix IPC server only, for now
 fn accept_backoff(consecutive_errors: u32) -> std::time::Duration {
     use std::time::Duration;
     const FIRST: Duration = Duration::from_millis(50);
@@ -515,6 +532,7 @@ impl IpcSlots {
 /// IPC-ADMISSION-002: root, or the configured operator UID (the same identity
 /// `check_authorized` accepts for mutating requests). An unknown caller is
 /// never privileged.
+#[cfg_attr(not(unix), allow(dead_code))] // WIN-001: used by the Unix IPC server only, for now
 fn is_privileged_uid(uid: Option<u32>, operator: Option<u32>) -> bool {
     uid == Some(0) || (uid.is_some() && uid == operator)
 }
@@ -523,6 +541,7 @@ fn is_privileged_uid(uid: Option<u32>, operator: Option<u32>) -> bool {
 /// no slot was free. Written with a single non-blocking `try_write` into the
 /// empty socket buffer, so no task is spawned and nothing the client does can
 /// park it.
+#[cfg_attr(not(unix), allow(dead_code))] // WIN-001: used by the Unix IPC server only, for now
 fn busy_reply_frame() -> bytes::BytesMut {
     use tokio_util::codec::Encoder;
     let mut buf = bytes::BytesMut::new();
@@ -543,6 +562,7 @@ fn busy_reply_frame() -> bytes::BytesMut {
 /// socket stays non-blocking, and a ~60 byte frame into an empty buffer cannot
 /// fill it, so this never blocks and spawns nothing. Returns whether the whole
 /// frame was written.
+#[cfg(unix)]
 fn send_busy_reply(stream: UnixStream) -> bool {
     use std::io::Write;
     let Ok(mut std_stream) = stream.into_std() else {
@@ -566,6 +586,7 @@ impl std::error::Error for RequestTimedOut {}
 
 /// IPC-ADMISSION-001: read the first request, giving up after `timeout`. Covers
 /// a client that sends nothing, a partial length prefix, or a partial body.
+#[cfg_attr(not(unix), allow(dead_code))] // WIN-001: used by the Unix IPC server only, for now
 async fn recv_request_bounded(
     framed: &mut ipc::IpcFramed,
     timeout: std::time::Duration,
@@ -578,6 +599,7 @@ async fn recv_request_bounded(
 
 /// IPC-ADMISSION-001: write a reply, giving up after `timeout`. Stops a client
 /// that never reads from holding the handler task and its descriptor.
+#[cfg_attr(not(unix), allow(dead_code))] // WIN-001: used by the Unix IPC server only, for now
 async fn send_reply_bounded(
     framed: &mut ipc::IpcFramed,
     msg: IpcMessage,
@@ -589,7 +611,7 @@ async fn send_reply_bounded(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use tokio::io::AsyncWriteExt;

@@ -25,6 +25,7 @@ pub fn generate_hostname() -> String {
 
 /// The machine's OS hostname (via `libc::gethostname`), sanitized into a
 /// valid tetron hostname, or `None` if unavailable/unusable.
+#[cfg(unix)]
 fn machine_hostname() -> Option<String> {
     let mut buf = [0u8; 256];
     let rc = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
@@ -34,6 +35,27 @@ fn machine_hostname() -> Option<String> {
     let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
     let raw = std::str::from_utf8(&buf[..end]).ok()?;
     sanitize_hostname(raw)
+}
+
+/// The machine's DNS host name (`GetComputerNameExW` with
+/// `ComputerNamePhysicalDnsHostname`, WIN-001), sanitized into a valid tetron
+/// hostname, or `None` if unavailable/unusable.
+#[cfg(windows)]
+fn machine_hostname() -> Option<String> {
+    use windows_sys::Win32::System::SystemInformation::{
+        ComputerNamePhysicalDnsHostname, GetComputerNameExW,
+    };
+    let mut buf = [0u16; 256];
+    let mut len = buf.len() as u32;
+    // SAFETY: `buf` is valid for `len` UTF-16 units; on success `len` is set to
+    // the number of units written, excluding the terminating NUL.
+    let ok =
+        unsafe { GetComputerNameExW(ComputerNamePhysicalDnsHostname, buf.as_mut_ptr(), &mut len) };
+    if ok == 0 {
+        return None;
+    }
+    let raw = String::from_utf16(buf.get(..len as usize)?).ok()?;
+    sanitize_hostname(&raw)
 }
 
 /// Turn an arbitrary string (an OS hostname, or a user-typed `--hostname`)

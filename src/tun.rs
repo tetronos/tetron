@@ -8,17 +8,21 @@
 // Android where the packet interface is a `VpnService` fd.
 #[cfg(not(target_os = "android"))]
 use std::net::{Ipv4Addr, Ipv6Addr};
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", windows)))]
 use std::process::Command;
 
+#[cfg(not(any(target_os = "android", windows)))]
+use anyhow::Context;
 #[cfg(not(target_os = "android"))]
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 // The desktop TUN device (the `tun` crate) and its async I/O helpers only exist
 // off Android, where the packet interface is a `VpnService` fd instead.
 #[cfg(not(target_os = "android"))]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(not(any(target_os = "android", windows)))]
+use tun::Configuration;
 #[cfg(not(target_os = "android"))]
-use tun::{Configuration, DeviceReader, DeviceWriter};
+use tun::{DeviceReader, DeviceWriter};
 
 /// Read side of a packet interface. Fills the spare capacity of `buf` with one
 /// IP packet and returns the number of bytes read. Abstracts the concrete TUN
@@ -193,11 +197,18 @@ fn local_ipv4_interfaces() -> Vec<(String, Ipv4Addr, u8)> {
     result
 }
 
+/// WIN-001: Windows enumeration (`GetAdaptersAddresses`) is not implemented
+/// yet. Empty is the documented fail-open result, the same as a missing tool.
+#[cfg(windows)]
+fn local_ipv4_interfaces() -> Vec<(String, Ipv4Addr, u8)> {
+    Vec::new()
+}
+
 /// Creates a TUN device with the given virtual IPs and splits it into
 /// independent read/write halves. IPv4 gets the configured overlay subnet's
 /// netmask (derived from its prefix length) so the kernel installs the connected
 /// route for the whole peer range; IPv6 gets a /7 prefix (`200::/7`) the same way.
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", windows)))]
 pub async fn create(
     v4: Ipv4Addr,
     v6: Ipv6Addr,
@@ -232,6 +243,19 @@ pub async fn create(
 
     let (writer, reader) = device.split()?;
     Ok((TunReader { reader }, TunWriter { writer }, tun_name))
+}
+
+/// WIN-001: the Wintun arm is not implemented yet. It must not reuse the Unix
+/// `Configuration` above as is: on Windows the `tun` crate turns an IPv4
+/// `destination` into a `0.0.0.0/0` route through the adapter, which would
+/// pull all of the host's IPv4 traffic into the mesh.
+#[cfg(windows)]
+pub async fn create(
+    _v4: Ipv4Addr,
+    _v6: Ipv6Addr,
+    _subnet: crate::membership::Subnet,
+) -> Result<(TunReader, TunWriter, String)> {
+    bail!("creating a TUN device is not yet supported on Windows")
 }
 
 /// Assigns the TUN's own IPv6 address. The `200::/7` peer range is routed into
@@ -472,6 +496,18 @@ pub async fn route_self_loopback(_v4: Ipv4Addr, _v6: Ipv6Addr) -> Result<()> {
     Ok(())
 }
 
+/// WIN-001: not implemented on Windows yet (needs IP Helper routes on the
+/// adapter LUID).
+#[cfg(windows)]
+pub async fn route_peer_range(
+    _tun_name: &str,
+    _subnet: crate::membership::Subnet,
+    _network_prefix: Ipv6Addr,
+    _prefix_len: u8,
+) -> Result<()> {
+    bail!("routing the peer range is not yet supported on Windows")
+}
+
 /// Bring the TUN interface administratively up (used when activating the VPN).
 #[cfg(not(target_os = "android"))]
 pub fn set_link_up(tun_name: &str) -> Result<()> {
@@ -516,6 +552,12 @@ pub fn delete(tun_name: &str) -> Result<()> {
     Ok(())
 }
 
+/// WIN-001: not implemented on Windows yet.
+#[cfg(windows)]
+pub fn delete(_tun_name: &str) -> Result<()> {
+    bail!("deleting a TUN device is not yet supported on Windows")
+}
+
 #[cfg(not(target_os = "android"))]
 fn set_link_state(tun_name: &str, up: bool) -> Result<()> {
     #[cfg(target_os = "macos")]
@@ -536,6 +578,12 @@ fn set_link_state(tun_name: &str, up: bool) -> Result<()> {
             .context("run ip link set")?;
         anyhow::ensure!(status.success(), "ip link set {state} failed with {status}");
     }
+    #[cfg(windows)]
+    {
+        let _ = (tun_name, up);
+        bail!("changing TUN link state is not yet supported on Windows");
+    }
+    #[cfg(not(windows))]
     Ok(())
 }
 

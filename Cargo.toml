@@ -153,3 +153,5 @@ rtnetlink = "0.21.0"
 [target.'cfg(windows)'.dependencies]
 # Enables ANSI escape processing on legacy Windows consoles (no-op on modern terminals).
 enable-ansi-support = "0.3"
+# Win32 bindings for the Windows arms of hostname and, later, IPC/TUN/service.
+windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation"] }

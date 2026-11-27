@@ -45,6 +45,7 @@ cargo -q build                 # add --features tor for Tor transport, --feature
 cargo -q check
 cargo -q test --workspace      # --workspace is required: without it only the root `tetron` package is tested, silently skipping `tetron-proto`'s own tests
 cargo -q clippy --workspace --all-targets   # same trap; `reconcile.py` already runs both this way
+cargo -q clippy --workspace --all-targets --target x86_64-pc-windows-gnu -- -D warnings   # Windows compile gate (WIN-001, needs mingw-w64); check only: mingw can not link iroh-relay's cdylib, release builds use msvc in CI
 cargo bench                    # Criterion microbenchmarks of the per-packet data path (benches/forward.rs)
 cargo build --release          # distributable binary at target/release/tetron
 ```

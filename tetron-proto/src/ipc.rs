@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use bytes::{Bytes, BytesMut};
 use iroh::EndpointId;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+#[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio_util::codec::{Decoder, Encoder, Framed, LengthDelimitedCodec};
 
@@ -651,7 +652,14 @@ pub fn epoch_check(protocol_epoch: &str, daemon_version: &str) -> EpochCheck {
     }
 }
 
-pub type IpcFramed = Framed<UnixStream, MsgpackCodec<IpcMessage>>;
+/// The byte stream under the IPC framing. `UnixStream` on Unix; a named-pipe
+/// client on Windows (WIN-001), where the transport is not implemented yet.
+#[cfg(unix)]
+pub type IpcStream = UnixStream;
+#[cfg(windows)]
+pub type IpcStream = tokio::net::windows::named_pipe::NamedPipeClient;
+
+pub type IpcFramed = Framed<IpcStream, MsgpackCodec<IpcMessage>>;
 
 /// `TETRON_SOCKET_PATH` overrides the resolved path on every platform
 /// (PORTABILITY-003, same override-then-fixed-defaults shape as
@@ -672,6 +680,7 @@ pub fn socket_path() -> PathBuf {
     }
 }
 
+#[cfg(unix)]
 pub async fn connect() -> Result<IpcFramed> {
     let path = socket_path();
     let stream = UnixStream::connect(&path)
@@ -680,7 +689,13 @@ pub async fn connect() -> Result<IpcFramed> {
     Ok(Framed::new(stream, MsgpackCodec::new()))
 }
 
-pub fn framed(stream: UnixStream) -> IpcFramed {
+/// WIN-001: the daemon IPC transport is not implemented on Windows yet.
+#[cfg(windows)]
+pub async fn connect() -> Result<IpcFramed> {
+    anyhow::bail!("daemon IPC is not yet supported on Windows")
+}
+
+pub fn framed(stream: IpcStream) -> IpcFramed {
     Framed::new(stream, MsgpackCodec::new())
 }
 

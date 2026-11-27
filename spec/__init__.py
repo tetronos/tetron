@@ -1,4 +1,4 @@
-from . import addressing, branding, cli, constraints, core, membership, security
+from . import addressing, branding, cli, constraints, core, membership, security, windows
 
 __all__ = [
     "core",
@@ -8,4 +8,5 @@ __all__ = [
     "cli",
     "security",
     "constraints",
+    "windows",
 ]

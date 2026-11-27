@@ -3,7 +3,9 @@
 //! Re-exported from `crate::config` so every existing `crate::config::…`
 //! path keeps compiling unchanged.
 
+#[cfg(unix)]
 use std::fs::Permissions;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -187,6 +189,16 @@ fn validate_net_name(name: &str) -> Result<()> {
 /// Public so every tetron config writer (identity key, invite ledger, etc.)
 /// shares the same atomic + restrictive-perms guarantees under the config tree.
 pub fn write_file(path: &Path, bytes: &[u8], secret: bool) -> Result<()> {
+    // WIN-001: a secret file needs a protected ACL set at creation, which is
+    // not implemented on Windows yet. Refuse rather than write a key that
+    // inherits the parent directory's default (user-readable) ACL.
+    #[cfg(windows)]
+    if secret {
+        anyhow::bail!(
+            "writing protected file {} is not yet supported on Windows",
+            path.display()
+        );
+    }
     let dir = path.parent().context("config path has no parent")?;
     ensure_dir(dir)?;
     let fname = path
@@ -202,8 +214,7 @@ pub fn write_file(path: &Path, bytes: &[u8], secret: bool) -> Result<()> {
             .with_context(|| format!("writing {}", tmp.display()))?;
         f.sync_all().ok();
     }
-    let mode = if secret { 0o600 } else { 0o640 };
-    let _ = std::fs::set_permissions(&tmp, Permissions::from_mode(mode));
+    set_mode(&tmp, secret);
     #[cfg(target_os = "linux")]
     set_owner(&tmp, secret);
     let renamed = std::fs::rename(&tmp, path);
@@ -215,6 +226,18 @@ pub fn write_file(path: &Path, bytes: &[u8], secret: bool) -> Result<()> {
     Ok(())
 }
 
+/// `0600` for secret files, `0640` otherwise. Best-effort. Windows carries
+/// access in ACLs instead of mode bits (not implemented yet, WIN-001), so this
+/// is a no-op there.
+#[cfg(unix)]
+fn set_mode(path: &Path, secret: bool) {
+    let mode = if secret { 0o600 } else { 0o640 };
+    let _ = std::fs::set_permissions(path, Permissions::from_mode(mode));
+}
+
+#[cfg(not(unix))]
+fn set_mode(_path: &Path, _secret: bool) {}
+
 fn write_atomic(path: &Path, contents: &str, secret: bool) -> Result<()> {
     write_file(path, contents.as_bytes(), secret)
 }
@@ -223,8 +246,7 @@ fn write_atomic(path: &Path, contents: &str, secret: bool) -> Result<()> {
 /// For append-mode files (e.g. the audit log) that aren't rewritten via
 /// [`write_file`]. Best-effort.
 pub fn restrict_perms(path: &Path, secret: bool) {
-    let mode = if secret { 0o600 } else { 0o640 };
-    let _ = std::fs::set_permissions(path, Permissions::from_mode(mode));
+    set_mode(path, secret);
     #[cfg(target_os = "linux")]
     set_owner(path, secret);
 }

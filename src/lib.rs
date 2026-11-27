@@ -8,6 +8,10 @@
 //! version range. `src/main.rs` is a thin clap CLI + IPC client built on top,
 //! importing these modules via `use tetron::…`.
 #![doc(hidden)]
+// WIN-001: on Windows the daemon has no IPC server yet, so the request
+// handlers it would dispatch to are unreachable there. Lifted when the
+// named-pipe server lands.
+#![cfg_attr(windows, allow(dead_code))]
 
 pub const APP_NAME: &str = "tetron";
 
@@ -35,4 +39,5 @@ pub mod shutdown;
 pub mod stats;
 pub mod transport;
 pub mod tun;
+#[cfg(unix)]
 pub mod userdb;

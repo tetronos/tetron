@@ -58,6 +58,7 @@ use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{EndpointId, SecretKey};
 use iroh_blobs::store::fs::FsStore;
 use iroh_blobs::{BlobsProtocol, HashAndFormat};
+#[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Notify;
 use tokio::sync::mpsc;

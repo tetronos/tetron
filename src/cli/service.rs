@@ -508,6 +508,7 @@ pub(crate) async fn cmd_resume(hostname: Option<String>, network: Option<String>
 /// it never comes up (e.g. it crashed on a port/route conflict with another
 /// VPN), we surface the tail of its log so the user knows what went wrong
 /// instead of seeing a cheerful "started" followed by a dead `tetron status`.
+#[cfg(not(windows))]
 pub(crate) async fn install_and_start_service(
     hostname: Option<String>,
     overrides: &PathOverrides,
@@ -585,6 +586,15 @@ pub(crate) async fn install_and_start_service(
     }
 }
 
+/// WIN-001: the Windows service is not implemented yet.
+#[cfg(windows)]
+pub(crate) async fn install_and_start_service(
+    _hostname: Option<String>,
+    _overrides: &PathOverrides,
+) -> Result<()> {
+    anyhow::bail!("installing the system service is not yet supported on Windows")
+}
+
 /// When the service is (re)installed under `sudo`, grant the invoking user
 /// (`$SUDO_USER`) operator access so subsequent `tetron` commands work without
 /// root. Best-effort: silent if there is no `$SUDO_USER` or the daemon refuses.
@@ -608,6 +618,7 @@ pub(crate) async fn grant_operator_to_invoking_user() {
 
 /// Ensure the process is running as root for service-manager operations.
 /// Prints a clear `sudo` hint and exits non-zero otherwise.
+#[cfg(unix)]
 pub(crate) fn require_root() -> Result<()> {
     if unsafe { libc::geteuid() } != 0 {
         eprintln!(
@@ -617,6 +628,14 @@ pub(crate) fn require_root() -> Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// WIN-001: the token-elevation check is not implemented yet.
+#[cfg(windows)]
+pub(crate) fn require_root() -> Result<()> {
+    anyhow::bail!(
+        "this command manages the system service and requires an elevated (Administrator) terminal; the elevation check is not yet supported on Windows"
+    )
 }
 
 /// Full version string: the crate version plus the git short SHA stamped in by
@@ -1077,6 +1096,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn package_owner_with_resolves_symlinks_before_asking() {
         let dir = tempfile::tempdir().unwrap();
         let real = dir.path().join("real-tetron");
