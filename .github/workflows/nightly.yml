@@ -189,7 +189,7 @@ jobs:
             ${{ matrix.name }}
             ${{ matrix.name }}.sha256
 
-  # WIN-080: Windows zip (tetron.exe, wintun.dll, licenses). Runs only when the
+  # WIN-080/085: Windows self-installing .exe and zip. Runs only when the
   # repository variable WINDOWS_RELEASE is "true" (Settings > Secrets and
   # variables > Actions > Variables), so publishing Windows builds is a
   # deliberate switch, not a side effect of the next tag.
@@ -214,12 +214,11 @@ jobs:
           shared-key: "release-x86_64-pc-windows-msvc"
           cache-on-failure: true
 
-      - name: Build binary
-        run: cargo build --release --locked --target x86_64-pc-windows-msvc
-
-      - name: Package for release
+      # Fetches and verifies the pinned Wintun, builds with it embedded
+      # (WIN-085), and writes the .exe, the .zip and their .sha256 files.
+      - name: Build and package
         shell: pwsh
-        run: ./contrib/package-windows.ps1 -Binary target/x86_64-pc-windows-msvc/release/tetron.exe
+        run: ./contrib/package-windows.ps1
 
       - name: Upload nightly assets
         uses: softprops/action-gh-release@v2
@@ -228,5 +227,8 @@ jobs:
         with:
           tag_name: nightly
           files: |
+            tetron-x86_64-windows.exe
+            tetron-x86_64-windows.exe.sha256
             tetron-x86_64-windows.zip
             tetron-x86_64-windows.zip.sha256
+            WINTUN-LICENSE.txt

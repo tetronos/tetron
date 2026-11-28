@@ -225,6 +225,11 @@ pub(crate) enum Command {
         /// service unit so daemon and clients communicate over this socket.
         #[arg(long)]
         socket_path: Option<String>,
+
+        /// Wait for Enter before exiting (WIN-085: the elevated window a
+        /// double-click install opens stays readable).
+        #[arg(long, hide = true)]
+        pause: bool,
     },
     /// Restart the system service (requires root)
     Restart,
@@ -581,6 +586,12 @@ fn append_panic_log(
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // WIN-085: double-clicked in Explorer with no arguments: offer to install
+    // instead of printing usage into a window that closes at once.
+    #[cfg(windows)]
+    if std::env::args_os().len() == 1 && cli::launched_by_double_click() {
+        return cli::double_click_install();
+    }
     let cli = Cli::parse();
     if cli.json {
         JSON_FLAG.store(true, atomic::Ordering::Relaxed);
@@ -660,7 +671,18 @@ async fn main() -> Result<()> {
             config_dir,
             log_dir,
             socket_path,
-        } => cmd_install(config_dir, log_dir, socket_path).await,
+            pause,
+        } => {
+            let result = cmd_install(config_dir, log_dir, socket_path).await;
+            if pause {
+                if let Err(e) = &result {
+                    eprintln!("Error: {e:#}");
+                }
+                println!("Press Enter to close.");
+                let _ = std::io::stdin().read_line(&mut String::new());
+            }
+            result
+        }
         Command::Restart => cmd_restart().await,
         Command::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "tetron", &mut std::io::stdout());

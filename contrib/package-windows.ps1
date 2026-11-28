@@ -1,13 +1,14 @@
-# Builds the Windows release archive tetron-x86_64-windows.zip (WIN-080/081).
+# Builds the Windows release assets (WIN-080, WIN-081, WIN-085):
+#   tetron-x86_64-windows.exe   self-installing tetron.exe with wintun.dll embedded
+#   tetron-x86_64-windows.zip   tetron.exe, wintun.dll, tetron's LICENSE, Wintun's license
+# plus a .sha256 beside each.
 #
-# Usage, from the repository root on Windows, after `cargo build --release`:
-#   pwsh contrib/package-windows.ps1 -Binary target\x86_64-pc-windows-msvc\release\tetron.exe
-#
-# The archive holds tetron.exe, wintun.dll (amd64), tetron's LICENSE and
-# Wintun's own license. A .sha256 file is written beside it.
+# Usage, from the repository root on Windows:
+#   pwsh contrib/package-windows.ps1 [-Features tor,veilid] [-Target x86_64-pc-windows-msvc]
 
 param(
-    [Parameter(Mandatory = $true)][string]$Binary,
+    [string]$Features = "",
+    [string]$Target = "x86_64-pc-windows-msvc",
     [string]$OutName = "tetron-x86_64-windows"
 )
 
@@ -20,10 +21,13 @@ $WintunVersion = "0.14.1"
 $WintunSha256 = "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51"
 $WintunUrl = "https://www.wintun.net/builds/wintun-$WintunVersion.zip"
 
-$work = Join-Path ([System.IO.Path]::GetTempPath()) ("tetron-package-" + [guid]::NewGuid())
+# A per-run folder under target/, so the build can embed the DLL by absolute
+# path and nothing outside the build tree is touched.
+New-Item -ItemType Directory -Force -Path "target" | Out-Null
+$work = Join-Path (Resolve-Path "target").Path ("package-windows-" + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $work | Out-Null
 try {
-    # Fetch and verify Wintun.
+    # 1. Fetch and verify Wintun.
     $wintunZip = Join-Path $work "wintun.zip"
     Invoke-WebRequest -Uri $WintunUrl -OutFile $wintunZip -UseBasicParsing
     $actual = (Get-FileHash -Algorithm SHA256 $wintunZip).Hash.ToLowerInvariant()
@@ -31,29 +35,49 @@ try {
         throw "wintun-$WintunVersion.zip hash $actual does not match the pinned $WintunSha256"
     }
     Expand-Archive -Path $wintunZip -DestinationPath (Join-Path $work "wintun-src")
+    $dll = Join-Path $work "wintun-src\wintun\bin\amd64\wintun.dll"
+    $wintunLicense = Join-Path $work "wintun-src\wintun\LICENSE.txt"
 
-    # Lay out the archive contents.
+    # 2. Build with the verified DLL embedded (build.rs reads TETRON_WINTUN_DLL).
+    $env:TETRON_WINTUN_DLL = $dll
+    $cargoArgs = @("build", "--release", "--locked", "--target", $Target)
+    if ($Features -ne "") { $cargoArgs += @("--features", $Features) }
+    & cargo @cargoArgs
+    if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
+    $binary = "target\$Target\release\tetron.exe"
+
+    # The built binary must start.
+    $version = & $binary --version
+    if ($LASTEXITCODE -ne 0) { throw "tetron.exe --version failed" }
+    Write-Host "built $version with wintun $WintunVersion embedded"
+
+    # 3a. The self-installing executable.
+    $exe = "$OutName.exe"
+    Copy-Item $binary $exe -Force
+
+    # 3b. The zip, for installs that want the DLL as a separate file.
     $stage = Join-Path $work $OutName
     New-Item -ItemType Directory -Path $stage | Out-Null
-    Copy-Item $Binary (Join-Path $stage "tetron.exe")
-    Copy-Item (Join-Path $work "wintun-src\wintun\bin\amd64\wintun.dll") $stage
+    Copy-Item $binary (Join-Path $stage "tetron.exe")
+    Copy-Item $dll $stage
     Copy-Item "LICENSE" (Join-Path $stage "LICENSE")
-    Copy-Item (Join-Path $work "wintun-src\wintun\LICENSE.txt") (Join-Path $stage "WINTUN-LICENSE.txt")
-
-    # The packaged binary must start.
-    $version = & (Join-Path $stage "tetron.exe") --version
-    if ($LASTEXITCODE -ne 0) { throw "packaged tetron.exe --version failed" }
-    Write-Host "packaged $version with wintun $WintunVersion"
-
-    # Archive and checksum, in the same "<hash>  <name>" form as the other
-    # release assets.
+    Copy-Item $wintunLicense (Join-Path $stage "WINTUN-LICENSE.txt")
     $zip = "$OutName.zip"
     if (Test-Path $zip) { Remove-Item $zip }
     Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $zip
-    $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
-    Set-Content -Path "$zip.sha256" -Value "$hash  $zip" -NoNewline -Encoding ascii
-    Write-Host "wrote $zip ($hash)"
+
+    # Wintun's license is also published on its own, beside the executable
+    # that embeds the DLL.
+    Copy-Item $wintunLicense "WINTUN-LICENSE.txt" -Force
+
+    # Checksums, in the same "<hash>  <name>" form as the other release assets.
+    foreach ($f in @($exe, $zip)) {
+        $hash = (Get-FileHash -Algorithm SHA256 $f).Hash.ToLowerInvariant()
+        Set-Content -Path "$f.sha256" -Value "$hash  $f" -NoNewline -Encoding ascii
+        Write-Host "wrote $f ($hash)"
+    }
 }
 finally {
+    Remove-Item Env:\TETRON_WINTUN_DLL -ErrorAction SilentlyContinue
     Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
 }

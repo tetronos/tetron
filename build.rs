@@ -31,6 +31,25 @@ fn main() {
         println!("cargo:rustc-link-arg-bin=tetron={arg}");
     }
 
+    // WIN-085: embed wintun.dll into the Windows binary when the build names
+    // one (the release packaging sets TETRON_WINTUN_DLL to the pinned,
+    // hash-checked official DLL). Without it nothing is embedded.
+    println!("cargo:rustc-check-cfg=cfg(tetron_embedded_wintun)");
+    println!("cargo:rerun-if-env-changed=TETRON_WINTUN_DLL");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && let Some(dll) = std::env::var_os("TETRON_WINTUN_DLL")
+    {
+        let dll = std::path::PathBuf::from(dll);
+        assert!(
+            dll.is_absolute() && dll.is_file(),
+            "TETRON_WINTUN_DLL must be an absolute path to wintun.dll, got {}",
+            dll.display()
+        );
+        println!("cargo:rerun-if-changed={}", dll.display());
+        println!("cargo:rustc-env=TETRON_WINTUN_DLL_PATH={}", dll.display());
+        println!("cargo:rustc-cfg=tetron_embedded_wintun");
+    }
+
     // Rebuild when HEAD moves so the stamp stays current. `.git/HEAD` covers
     // commits/checkouts; the packed-refs/refs paths cover branch updates.
     println!("cargo:rerun-if-changed=.git/HEAD");

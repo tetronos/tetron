@@ -43,7 +43,7 @@ jobs:
       - name: Add install.ps1 (the Windows installer from this commit)
         run: |
           sudo install -m 644 contrib/install-tetron.ps1 _site/install.ps1
-          grep -q 'tetron-x86_64-windows.zip' _site/install.ps1 || { echo "install.ps1 is not the installer"; exit 1; }
+          grep -q 'tetron-x86_64-windows.exe' _site/install.ps1 || { echo "install.ps1 is not the installer"; exit 1; }
           ls -la _site
       - uses: actions/upload-pages-artifact@v3
         with:

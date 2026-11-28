@@ -4,16 +4,17 @@
 #   irm https://tetronos.github.io/tetron/install.ps1 | iex
 # or, to pin a release, download this file and run:
 #   .\install.ps1 -Version vX.Y.Z
-# -BaseUrl downloads the zip and its .sha256 from another location (a
+# -BaseUrl downloads the executable and its .sha256 from another location (a
 # mirror) instead of the GitHub release.
 #
 # What it does, in order:
-#   1. Downloads tetron-x86_64-windows.zip and its .sha256 from the tetron
-#      GitHub releases (the latest release, or the tag given with -Version).
-#   2. Stops unless the zip's SHA-256 matches the published .sha256.
-#   3. Extracts it to a new temporary folder and runs `tetron.exe install`
-#      from there. That copies tetron.exe and wintun.dll into
-#      %ProgramFiles%\tetron, registers and starts the `tetron` Windows
+#   1. Downloads tetron-x86_64-windows.exe (tetron with the Wintun driver DLL
+#      built in) and its .sha256 from the tetron GitHub releases (the latest
+#      release, or the tag given with -Version).
+#   2. Stops unless the file's SHA-256 matches the published .sha256.
+#   3. Runs `tetron-x86_64-windows.exe install` from a new temporary folder.
+#      That copies itself to %ProgramFiles%\tetron\tetron.exe, writes
+#      wintun.dll beside it, registers and starts the `tetron` Windows
 #      service (LocalSystem, automatic start), and activates the VPN.
 #   4. Adds %ProgramFiles%\tetron to the machine PATH if it is not there yet,
 #      so `tetron` works in new terminals.
@@ -32,7 +33,7 @@ $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
 $Repo = "tetronos/tetron"
-$Asset = "tetron-x86_64-windows.zip"
+$Asset = "tetron-x86_64-windows.exe"
 
 # The service install needs an elevated (Administrator) session.
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -56,25 +57,23 @@ if ($BaseUrl -ne "") {
 $work = Join-Path ([System.IO.Path]::GetTempPath()) ("tetron-install-" + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $work | Out-Null
 try {
-    # 1. Download the archive and its checksum.
-    $zip = Join-Path $work $Asset
-    $sum = "$zip.sha256"
+    # 1. Download the executable and its checksum.
+    $exe = Join-Path $work $Asset
+    $sum = "$exe.sha256"
     Write-Host "downloading $base/$Asset"
-    Invoke-WebRequest -Uri "$base/$Asset" -OutFile $zip -UseBasicParsing
+    Invoke-WebRequest -Uri "$base/$Asset" -OutFile $exe -UseBasicParsing
     Invoke-WebRequest -Uri "$base/$Asset.sha256" -OutFile $sum -UseBasicParsing
 
     # 2. Verify. The .sha256 file is "<hash>  <file name>".
     $expected = ((Get-Content $sum -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
-    $actual = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
+    $actual = (Get-FileHash -Algorithm SHA256 $exe).Hash.ToLowerInvariant()
     if ($expected -ne $actual) {
         throw "checksum mismatch for $Asset (expected $expected, got $actual); nothing was installed"
     }
     Write-Host "checksum ok ($actual)"
 
-    # 3. Extract and let tetron install itself as a service.
-    $dir = Join-Path $work "tetron"
-    Expand-Archive -Path $zip -DestinationPath $dir
-    & (Join-Path $dir "tetron.exe") install
+    # 3. Let tetron install itself as a service.
+    & $exe install
     if ($LASTEXITCODE -ne 0) { throw "tetron install failed (exit code $LASTEXITCODE)" }
 
     # 4. Put the install folder on the machine PATH for new terminals.

@@ -20,6 +20,8 @@ mod status;
 mod winservice;
 #[cfg(windows)]
 pub(crate) use winservice::run_dispatcher as run_service_dispatcher;
+#[cfg(windows)]
+pub(crate) use winservice::{double_click_install, launched_by_double_click};
 
 pub(crate) use admin::*;
 pub(crate) use invite::*;

@@ -135,29 +135,157 @@ fn same_dir(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Copy `tetron.exe` and `wintun.dll` from beside the running executable into
-/// the install directory, unless they already run from there. Returns the
-/// executable the service must run.
+/// `wintun.dll` embedded at build time (WIN-085), when the build named one.
+#[cfg(tetron_embedded_wintun)]
+const EMBEDDED_WINTUN: Option<&[u8]> = Some(include_bytes!(env!("TETRON_WINTUN_DLL_PATH")));
+#[cfg(not(tetron_embedded_wintun))]
+const EMBEDDED_WINTUN: Option<&[u8]> = None;
+
+/// Where the installed `wintun.dll` comes from: the file beside the running
+/// executable, or the copy embedded in it (WIN-085).
+enum WintunSource {
+    File(PathBuf),
+    Embedded(&'static [u8]),
+}
+
+fn wintun_source(src_dir: &Path) -> Result<WintunSource> {
+    let dll = src_dir.join("wintun.dll");
+    if dll.is_file() {
+        return Ok(WintunSource::File(dll));
+    }
+    EMBEDDED_WINTUN
+        .map(WintunSource::Embedded)
+        .with_context(|| {
+            format!(
+                "{} is missing; put the amd64 wintun.dll from wintun.net next to tetron.exe",
+                dll.display()
+            )
+        })
+}
+
+fn place_wintun(source: &WintunSource, dest: &Path) -> Result<()> {
+    match source {
+        WintunSource::File(f) if same_dir(f, dest) => Ok(()),
+        WintunSource::File(f) => std::fs::copy(f, dest).map(drop),
+        WintunSource::Embedded(bytes) => std::fs::write(dest, bytes),
+    }
+    .with_context(|| format!("placing wintun.dll at {}", dest.display()))
+}
+
+/// Copy `tetron.exe` into the install directory and place `wintun.dll` beside
+/// it (copied from beside the running executable, or written from the copy
+/// embedded in it). Returns the executable the service must run.
 fn install_files() -> Result<PathBuf> {
     let exe = std::env::current_exe().context("locating tetron.exe")?;
     let src = exe.parent().context("tetron.exe has no directory")?;
-    let dll = src.join("wintun.dll");
-    anyhow::ensure!(
-        dll.is_file(),
-        "{} is missing; put the amd64 wintun.dll from wintun.net next to tetron.exe",
-        dll.display()
-    );
+    let wintun = wintun_source(src)?;
     let dir = install_dir();
     let target = dir.join("tetron.exe");
+    let dll = dir.join("wintun.dll");
     if same_dir(src, &dir) {
+        place_wintun(&wintun, &dll)?;
         return Ok(target);
     }
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     std::fs::copy(&exe, &target).with_context(|| format!("copying to {}", target.display()))?;
-    std::fs::copy(&dll, dir.join("wintun.dll"))
-        .with_context(|| format!("copying wintun.dll to {}", dir.display()))?;
+    place_wintun(&wintun, &dll)?;
     println!("installed tetron.exe and wintun.dll in {}", dir.display());
     Ok(target)
+}
+
+// ---------------------------------------------------------------------------
+// WIN-085: double-click install
+// ---------------------------------------------------------------------------
+
+/// Started from Explorer: the console window belongs to this process alone.
+/// A terminal (cmd, PowerShell, Windows Terminal) is another process on the
+/// same console.
+pub(crate) fn launched_by_double_click() -> bool {
+    let mut pids = [0u32; 4];
+    // SAFETY: `pids` is writable for the length passed.
+    let n = unsafe {
+        windows_sys::Win32::System::Console::GetConsoleProcessList(
+            pids.as_mut_ptr(),
+            pids.len() as u32,
+        )
+    };
+    n == 1
+}
+
+fn wait_for_enter(prompt: &str) {
+    println!("{prompt}");
+    let mut line = String::new();
+    let _ = std::io::stdin().read_line(&mut line);
+}
+
+/// The double-click flow: explain, confirm, then run `install` elevated (one
+/// UAC prompt) in its own window, which pauses before closing.
+pub(crate) fn double_click_install() -> Result<()> {
+    println!(
+        "tetron {}\n\nThis installs tetron as a Windows service: it copies tetron.exe and\n\
+         wintun.dll into {} and starts the service, which runs at\n\
+         boot. Windows asks for administrator approval.\n",
+        super::service::FULL_VERSION,
+        install_dir().display()
+    );
+    print!("Install now? [Y/n] ");
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let mut answer = String::new();
+    let _ = std::io::stdin().read_line(&mut answer);
+    if answer.trim().eq_ignore_ascii_case("n") {
+        wait_for_enter("Not installed. Press Enter to close.");
+        return Ok(());
+    }
+    let exe = std::env::current_exe().context("locating tetron.exe")?;
+    match run_elevated(&exe, "install --pause") {
+        Ok(0) => println!("Installed. Open a new terminal and run: tetron status"),
+        Ok(code) => println!("The install window reported a failure (exit code {code})."),
+        Err(e) => println!("Could not start the installer: {e:#}"),
+    }
+    wait_for_enter("Press Enter to close.");
+    Ok(())
+}
+
+/// Run `exe args` with the `runas` verb (UAC prompt) and wait for it; returns
+/// its exit code. Declining the prompt is an error.
+fn run_elevated(exe: &Path, args: &str) -> Result<u32> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, INFINITE, WaitForSingleObject,
+    };
+    use windows_sys::Win32::UI::Shell::{
+        SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let wide = |s: &std::ffi::OsStr| -> Vec<u16> { s.encode_wide().chain(Some(0)).collect() };
+    let verb = wide(OsStr::new("runas"));
+    let file = wide(exe.as_os_str());
+    let params = wide(OsStr::new(args));
+    // SAFETY: a zeroed SHELLEXECUTEINFOW is valid; the string pointers below
+    // outlive the call.
+    let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+    info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+    info.fMask = SEE_MASK_NOCLOSEPROCESS;
+    info.lpVerb = verb.as_ptr();
+    info.lpFile = file.as_ptr();
+    info.lpParameters = params.as_ptr();
+    info.nShow = SW_SHOWNORMAL;
+    // SAFETY: `info` is fully initialized for ShellExecuteExW.
+    if unsafe { ShellExecuteExW(&mut info) } == 0 || info.hProcess.is_null() {
+        return Err(std::io::Error::last_os_error())
+            .context("administrator approval was declined or the installer did not start");
+    }
+    let mut code = 1u32;
+    // SAFETY: `hProcess` is a process handle owned here, closed once below.
+    unsafe {
+        WaitForSingleObject(info.hProcess, INFINITE);
+        GetExitCodeProcess(info.hProcess, &mut code);
+        CloseHandle(info.hProcess);
+    }
+    Ok(code)
 }
 
 // ---------------------------------------------------------------------------

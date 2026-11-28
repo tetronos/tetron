@@ -835,3 +835,35 @@ class WindowsVersionSites(Requirement):
     Depends on WIN-080.
     """
     req_id = "WIN-083"
+
+
+class WindowsSelfInstallingExe(Requirement):
+    """REQUIREMENT-ID: WIN-085
+
+    The Windows release asset `tetron-x86_64-windows.exe` installs itself:
+    one file, no separate `wintun.dll`.
+
+    - `build.rs` embeds `wintun.dll` into the Windows binary when the build
+      environment names it (`TETRON_WINTUN_DLL`, an absolute path); the
+      release packaging sets it to the pinned, hash-checked official DLL
+      (WIN-081). Without the variable nothing is embedded and behaviour is
+      unchanged (the DLL must sit beside `tetron.exe`).
+    - `tetron install` writes the embedded DLL, unmodified, beside the
+      installed `tetron.exe` in `%ProgramFiles%\\tetron` when no `wintun.dll`
+      sits beside the running executable (WIN-056 otherwise copies that one).
+    - Double-click from Explorer: started with no arguments in a console that
+      belongs to tetron alone (`GetConsoleProcessList` returns 1), tetron
+      explains that it will install the `tetron` Windows service, asks for
+      confirmation, and runs `install` elevated through one UAC prompt
+      (relaunching itself with the `runas` verb when not already elevated),
+      then waits for Enter so the window does not close on its own. Started
+      from a terminal, nothing changes (no arguments prints the usual help).
+      The executable is not marked as requiring administrator rights, which
+      would raise UAC for every command.
+    - Releases publish the `.exe` (and its `.sha256`) beside the zip, and
+      `install.ps1` downloads the `.exe` instead of the zip. Wintun's license
+      text is still published with the release (WIN-081).
+
+    Depends on WIN-056, WIN-080, WIN-081, WIN-082.
+    """
+    req_id = "WIN-085"
