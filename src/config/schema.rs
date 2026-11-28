@@ -468,6 +468,10 @@ pub struct AppConfig {
     /// `--operator` model). `None` means root-only for mutating commands.
     #[serde(default)]
     pub operator_uid: Option<u32>,
+    /// Windows: SID of the user account authorized to control the daemon
+    /// without an elevated token (WIN-060). `None` means elevated-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_sid: Option<String>,
     /// Personal default hostname used when creating/joining a network without an
     /// explicit `--hostname`. Set via `tetron resume --hostname <name>`. `None` falls
     /// back to a random generated name.

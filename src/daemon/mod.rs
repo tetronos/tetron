@@ -91,7 +91,7 @@ use crate::tun;
 mod caller;
 mod mesh;
 
-pub(crate) use caller::Caller;
+pub(crate) use caller::{Caller, Operator};
 // The mesh core's join handshake and background-task/reconvergence helpers were
 // moved into `mesh/{join,background}.rs`; re-export them at the daemon level so
 // `mod.rs` and the other `mesh/` submodules (via `use super::super::*`) call them
@@ -1171,18 +1171,16 @@ impl MeshManager {
         req: &IpcMessage,
         caller: Option<&Caller>,
     ) -> Option<IpcMessage> {
-        Self::authorize(req, caller, || {
-            config::load().ok().and_then(|c| c.operator_uid)
-        })
+        Self::authorize(req, caller, Operator::load)
     }
 
     /// AUTHZ-001's rules over a platform-neutral caller (WIN-010). Pure apart
-    /// from `operator_uid`, which is only called when the answer depends on it,
+    /// from `operator`, which is only called when the answer depends on it,
     /// so the daemon's config load stays off the read and privileged paths.
     pub(crate) fn authorize(
         req: &IpcMessage,
         caller: Option<&Caller>,
-        operator_uid: impl FnOnce() -> Option<u32>,
+        operator: impl FnOnce() -> Operator,
     ) -> Option<IpcMessage> {
         // Reads are available to everyone (AUTHZ-001): `Status`, and
         // `AdminList`/`InviteList` (listing key-holders/invites mutates
@@ -1208,25 +1206,37 @@ impl MeshManager {
             return None;
         }
 
-        // Granting operator access is reserved for root.
-        if matches!(req, IpcMessage::SetOperator { .. }) {
+        // Granting operator access is reserved for root (Windows: LocalSystem
+        // or an elevated Administrator).
+        if matches!(
+            req,
+            IpcMessage::SetOperator { .. } | IpcMessage::SetOperatorSid { .. }
+        ) {
             return Some(IpcMessage::Error {
-                message: "permission denied: granting operator access requires root \
-                          (re-run with sudo)"
-                    .to_string(),
+                message: if cfg!(windows) {
+                    "permission denied: granting operator access requires an elevated \
+                     (Administrator) terminal"
+                        .to_string()
+                } else {
+                    "permission denied: granting operator access requires root \
+                     (re-run with sudo)"
+                        .to_string()
+                },
             });
         }
 
         // Otherwise the caller must be the configured operator.
-        let operator = operator_uid();
-        if caller.is_some_and(|c| c.is_operator(operator)) {
+        let operator = operator();
+        if caller.is_some_and(|c| c.is_operator(&operator)) {
             return None;
         }
 
         Some(IpcMessage::Error {
-            message: "permission denied: this user is not authorized to control tetron.\n\
-                      Grant access with: sudo tetron set-operator <user>"
-                .to_string(),
+            message: format!(
+                "permission denied: this user is not authorized to control tetron.\n\
+                 Grant access with: {}",
+                crate::admin_command("set-operator <user>")
+            ),
         })
     }
 
@@ -1270,6 +1280,14 @@ impl MeshManager {
     }
 
     pub(crate) fn set_operator(&self, uid: u32) -> IpcMessage {
+        // WIN-060: Windows identifies the operator by account SID.
+        if cfg!(windows) {
+            return IpcMessage::Error {
+                message: "on Windows the operator is a user account: \
+                          tetron set-operator <account> (from an elevated terminal)"
+                    .to_string(),
+            };
+        }
         let mut app_config = match config::load() {
             Ok(c) => c,
             Err(e) => {
@@ -1288,6 +1306,54 @@ impl MeshManager {
             message: format!(
                 "operator set to uid {uid}; that user can now run tetron without sudo"
             ),
+        }
+    }
+
+    /// WIN-060: persist the Windows operator account. Only a SID that resolves
+    /// to a user account is accepted (never a group or a well-known principal
+    /// such as LocalSystem). Authorization (privileged-only) is enforced in
+    /// `check_authorized`.
+    pub(crate) fn set_operator_sid(&self, sid: &str) -> IpcMessage {
+        #[cfg(windows)]
+        let account = match crate::windows_identity::user_account_for_sid(sid) {
+            Ok(name) => name,
+            Err(e) => {
+                return IpcMessage::Error {
+                    message: format!("{e:#}"),
+                };
+            }
+        };
+        #[cfg(not(windows))]
+        {
+            let _ = sid;
+            IpcMessage::Error {
+                message: "an operator SID is for Windows; on this system use \
+                          sudo tetron set-operator <user or UID>"
+                    .to_string(),
+            }
+        }
+        #[cfg(windows)]
+        {
+            let mut app_config = match config::load() {
+                Ok(c) => c,
+                Err(e) => {
+                    return IpcMessage::Error {
+                        message: format!("failed to load config: {e}"),
+                    };
+                }
+            };
+            app_config.operator_sid = Some(sid.to_string());
+            if let Err(e) = config::save_settings(&app_config) {
+                return IpcMessage::Error {
+                    message: format!("failed to save config: {e}"),
+                };
+            }
+            IpcMessage::Ok {
+                message: format!(
+                    "operator set to {account} ({sid}); that account can now control tetron \
+                     without an elevated terminal"
+                ),
+            }
         }
     }
 
@@ -1385,6 +1451,7 @@ impl MeshManager {
                 }
             }
             IpcMessage::SetOperator { uid } => self.set_operator(uid),
+            IpcMessage::SetOperatorSid { sid } => self.set_operator_sid(&sid),
             IpcMessage::SetLogLevel { level } => self.set_log_level(&level),
             IpcMessage::SetPathPreference { preference } => self.set_path_preference(preference),
             IpcMessage::AdminAdd { network, peer } => self.admin_add(&network, &peer).await,
@@ -3654,27 +3721,35 @@ mod check_authorized_tests {
         );
     }
 
-    /// WIN-010: every AUTHZ-001 rule over both caller variants and `None`.
-    /// `true` = permitted.
+    /// WIN-010, WIN-060: every AUTHZ-001 rule over both caller variants and
+    /// `None`. `true` = permitted.
     #[test]
     fn authorize_table_over_callers() {
         const OP: u32 = 1000;
+        const OP_SID: &str = "S-1-5-21-1-2-3-1000";
         let root = Caller::Unix { uid: 0, gid: 0 };
         let operator = Caller::Unix { uid: OP, gid: OP };
         let user = Caller::Unix {
             uid: 1001,
             gid: 1001,
         };
-        let win = |is_local_system, is_elevated_admin| Caller::Windows {
-            sid: "S-1-5-21-1-2-3-1001".to_string(),
+        let win = |sid: &str, is_local_system, is_elevated_admin| Caller::Windows {
+            sid: sid.to_string(),
             is_local_system,
             is_elevated_admin,
         };
-        let (system, admin, win_user) = (win(true, false), win(false, true), win(false, false));
+        let user_sid = "S-1-5-21-1-2-3-1001";
+        let system = win(user_sid, true, false);
+        let admin = win(user_sid, false, true);
+        let win_user = win(user_sid, false, false);
+        let win_op = win(OP_SID, false, false);
         let read = IpcMessage::Status;
         let mutate = IpcMessage::Standby { network: None };
         let set_op = IpcMessage::SetOperator { uid: OP };
-        let callers: [(&str, Option<&Caller>); 7] = [
+        let set_op_sid = IpcMessage::SetOperatorSid {
+            sid: OP_SID.to_string(),
+        };
+        let callers: [(&str, Option<&Caller>); 8] = [
             ("none", None),
             ("root", Some(&root)),
             ("operator", Some(&operator)),
@@ -3682,22 +3757,29 @@ mod check_authorized_tests {
             ("system", Some(&system)),
             ("admin", Some(&admin)),
             ("win_user", Some(&win_user)),
+            ("win_op", Some(&win_op)),
         ];
-        //                        none   root  op     user   system admin win_user
-        let want_read = [true, true, true, true, true, true, true];
-        let want_mutate = [false, true, true, false, true, true, false];
-        let want_set_op = [false, true, false, false, true, true, false];
+        //                 none   root  op     user   system admin win_user win_op
+        let want_read = [true, true, true, true, true, true, true, true];
+        let want_mutate = [false, true, true, false, true, true, false, true];
+        let want_set_op = [false, true, false, false, true, true, false, false];
+        let configured = || Operator {
+            uid: Some(OP),
+            sid: Some(OP_SID.to_string()),
+        };
         for (i, (name, caller)) in callers.iter().enumerate() {
             for (req, want) in [
                 (&read, want_read[i]),
                 (&mutate, want_mutate[i]),
                 (&set_op, want_set_op[i]),
+                (&set_op_sid, want_set_op[i]),
             ] {
-                let got = MeshManager::authorize(req, *caller, || Some(OP)).is_none();
+                let got = MeshManager::authorize(req, *caller, configured).is_none();
                 assert_eq!(got, want, "{name} {req:?}");
             }
         }
-        // With no operator configured, the would-be operator is just a user.
-        assert!(MeshManager::authorize(&mutate, Some(&operator), || None).is_some());
+        // With no operator configured, the would-be operators are just users.
+        assert!(MeshManager::authorize(&mutate, Some(&operator), Operator::default).is_some());
+        assert!(MeshManager::authorize(&mutate, Some(&win_op), Operator::default).is_some());
     }
 }

@@ -33,11 +33,51 @@ impl Caller {
         }
     }
 
-    /// Is the configured operator. Windows has no operator account yet.
-    pub(crate) fn is_operator(&self, operator_uid: Option<u32>) -> bool {
+    /// Is the configured operator: the operator UID on Unix, the operator
+    /// account's SID on Windows (WIN-060).
+    pub(crate) fn is_operator(&self, operator: &Operator) -> bool {
         match self {
-            Caller::Unix { uid, .. } => operator_uid == Some(*uid),
-            Caller::Windows { .. } => false,
+            Caller::Unix { uid, .. } => operator.uid == Some(*uid),
+            Caller::Windows { sid, .. } => operator
+                .sid
+                .as_deref()
+                .is_some_and(|op| op.eq_ignore_ascii_case(sid)),
+        }
+    }
+}
+
+/// The configured operator account (AUTHZ-001, WIN-060): a UID on Unix, a
+/// user SID on Windows. Each platform's caller is compared with its own field.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Operator {
+    pub(crate) uid: Option<u32>,
+    pub(crate) sid: Option<String>,
+}
+
+impl Operator {
+    /// The operator from the daemon's settings; none if they can not be read.
+    pub(crate) fn load() -> Operator {
+        crate::config::load()
+            .map(|c| Operator {
+                uid: c.operator_uid,
+                sid: c.operator_sid,
+            })
+            .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn uid(uid: u32) -> Operator {
+        Operator {
+            uid: Some(uid),
+            sid: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sid(sid: &str) -> Operator {
+        Operator {
+            uid: None,
+            sid: Some(sid.to_string()),
         }
     }
 }
@@ -70,19 +110,32 @@ mod tests {
             uid: 1000,
             gid: 1000,
         };
-        assert!(user.is_operator(Some(1000)));
-        assert!(!user.is_operator(Some(1001)));
-        assert!(!user.is_operator(None));
+        assert!(user.is_operator(&Operator::uid(1000)));
+        assert!(!user.is_operator(&Operator::uid(1001)));
+        assert!(!user.is_operator(&Operator::default()));
         // gid never matters.
         assert!(
             !Caller::Unix {
                 uid: 1001,
                 gid: 1000
             }
-            .is_operator(Some(1000))
+            .is_operator(&Operator::uid(1000))
         );
-        // No Windows operator account yet, whatever the configured UID.
-        assert!(!win(false, false).is_operator(Some(0)));
-        assert!(!win(false, false).is_operator(Some(1000)));
+        // A configured SID never makes a Unix caller the operator.
+        assert!(!user.is_operator(&Operator::sid("S-1-5-21-1-2-3-1001")));
+    }
+
+    // WIN-060: a Windows caller is the operator when its token user SID is the
+    // configured operator SID, compared case-insensitively.
+    #[test]
+    fn windows_operator_is_matching_sid_only() {
+        let user = win(false, false);
+        assert!(user.is_operator(&Operator::sid("S-1-5-21-1-2-3-1001")));
+        assert!(user.is_operator(&Operator::sid("s-1-5-21-1-2-3-1001")));
+        assert!(!user.is_operator(&Operator::sid("S-1-5-21-1-2-3-1002")));
+        assert!(!user.is_operator(&Operator::default()));
+        // A configured UID never makes a Windows caller the operator.
+        assert!(!user.is_operator(&Operator::uid(0)));
+        assert!(!user.is_operator(&Operator::uid(1000)));
     }
 }

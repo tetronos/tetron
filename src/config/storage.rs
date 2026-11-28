@@ -46,6 +46,8 @@ struct Settings {
     #[serde(default)]
     operator_uid: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    operator_sid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     default_hostname: Option<String>,
     #[serde(
         default,
@@ -616,6 +618,7 @@ fn load_in(dir: &Path) -> Result<AppConfig> {
     } else {
         Settings {
             operator_uid: None,
+            operator_sid: None,
             default_hostname: None,
             subnet: None,
             relay: ServerOverride::default(),
@@ -667,6 +670,7 @@ fn load_in(dir: &Path) -> Result<AppConfig> {
 
     Ok(AppConfig {
         operator_uid: settings.operator_uid,
+        operator_sid: settings.operator_sid,
         default_hostname: settings.default_hostname,
         subnet: settings.subnet,
         relay: settings.relay,
@@ -750,6 +754,7 @@ pub fn set_node_subnet(subnet: crate::membership::Subnet) -> Result<()> {
 fn save_settings_in(dir: &Path, config: &AppConfig) -> Result<()> {
     let settings = Settings {
         operator_uid: config.operator_uid,
+        operator_sid: config.operator_sid.clone(),
         default_hostname: config.default_hostname.clone(),
         subnet: config.subnet,
         relay: config.relay.clone(),

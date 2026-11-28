@@ -10,11 +10,11 @@ use std::os::windows::ffi::OsStringExt;
 
 use anyhow::{Context, Result};
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, LocalFree};
-use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+use windows_sys::Win32::Security::Authorization::{ConvertSidToStringSidW, ConvertStringSidToSidW};
 use windows_sys::Win32::Security::{
-    CheckTokenMembership, CreateWellKnownSid, DuplicateToken, GetTokenInformation, PSID,
-    RevertToSelf, SecurityIdentification, TOKEN_DUPLICATE, TOKEN_QUERY, TOKEN_USER, TokenUser,
-    WinBuiltinAdministratorsSid,
+    CheckTokenMembership, CreateWellKnownSid, DuplicateToken, GetTokenInformation,
+    LookupAccountSidW, PSID, RevertToSelf, SecurityIdentification, TOKEN_DUPLICATE, TOKEN_QUERY,
+    TOKEN_USER, TokenUser, WinBuiltinAdministratorsSid,
 };
 use windows_sys::Win32::System::Pipes::ImpersonateNamedPipeClient;
 use windows_sys::Win32::System::Threading::{
@@ -226,6 +226,102 @@ pub fn named_pipe_client_identity(
     })
 }
 
+/// `SID_NAME_USE` of a user account.
+const SID_TYPE_USER: i32 = 1;
+
+/// What a `SID_NAME_USE` value names, for error messages.
+fn sid_type_name(kind: i32) -> &'static str {
+    match kind {
+        1 => "a user account",
+        2 => "a group",
+        3 => "a domain",
+        4 => "a local group",
+        5 => "a well-known group or principal",
+        6 => "a deleted account",
+        9 => "a computer account",
+        10 => "an integrity label",
+        11 => "a logon session",
+        _ => "not an account",
+    }
+}
+
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// `DOMAIN\name` and the `SID_NAME_USE` of a SID, via `LookupAccountSidW`.
+fn lookup_sid(sid: PSID) -> Result<(String, i32)> {
+    let (mut name_len, mut domain_len, mut kind) = (0u32, 0u32, 0i32);
+    // SAFETY: a size query with null buffers; it fails by design and writes
+    // the required lengths.
+    unsafe {
+        LookupAccountSidW(
+            std::ptr::null(),
+            sid,
+            std::ptr::null_mut(),
+            &mut name_len,
+            std::ptr::null_mut(),
+            &mut domain_len,
+            &mut kind,
+        );
+    }
+    if name_len == 0 {
+        // SAFETY: reads this thread's last error.
+        let code = unsafe { GetLastError() };
+        anyhow::bail!("no account has this SID (Win32 error {code})");
+    }
+    let mut name = vec![0u16; name_len as usize];
+    let mut domain = vec![0u16; domain_len.max(1) as usize];
+    // SAFETY: the buffers hold the lengths the size query reported.
+    let ok = unsafe {
+        LookupAccountSidW(
+            std::ptr::null(),
+            sid,
+            name.as_mut_ptr(),
+            &mut name_len,
+            domain.as_mut_ptr(),
+            &mut domain_len,
+            &mut kind,
+        )
+    };
+    if ok == 0 {
+        // SAFETY: reads this thread's last error.
+        let code = unsafe { GetLastError() };
+        anyhow::bail!("looking up the account failed (Win32 error {code})");
+    }
+    let name = String::from_utf16_lossy(&name[..name_len as usize]);
+    let domain = String::from_utf16_lossy(&domain[..domain_len as usize]);
+    let full = if domain.is_empty() {
+        name
+    } else {
+        format!("{domain}\\{name}")
+    };
+    Ok((full, kind))
+}
+
+/// WIN-060: the `DOMAIN\name` of `sid` when it is a user account. A malformed
+/// SID, an unknown one, or one naming a group or a well-known principal (such
+/// as LocalSystem) is an error saying what it is.
+pub fn user_account_for_sid(sid: &str) -> Result<String> {
+    let text = wide(sid);
+    let mut raw: PSID = std::ptr::null_mut();
+    // SAFETY: `text` is NUL-terminated; `raw` receives a LocalAlloc'd SID.
+    if unsafe { ConvertStringSidToSidW(text.as_ptr(), &mut raw) } == 0 || raw.is_null() {
+        anyhow::bail!("'{sid}' is not a valid SID (expected S-1-5-21-...)");
+    }
+    let looked_up = lookup_sid(raw);
+    // SAFETY: allocated by ConvertStringSidToSidW with LocalAlloc.
+    unsafe { LocalFree(raw.cast()) };
+    let (account, kind) = looked_up.with_context(|| format!("SID {sid}"))?;
+    if kind != SID_TYPE_USER {
+        anyhow::bail!(
+            "{account} ({sid}) is {}, not a user account; the operator must be one user",
+            sid_type_name(kind)
+        );
+    }
+    Ok(account)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,6 +352,35 @@ mod tests {
         // SAFETY: a query on this thread; a failure is the expected outcome.
         let opened = unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, &mut token) };
         assert_eq!(opened, 0, "the thread still impersonates after the call");
+    }
+
+    // WIN-060: the current user resolves; groups and well-known principals and
+    // malformed SIDs are refused with what they are.
+    #[test]
+    fn user_account_for_sid_accepts_only_users() {
+        let me = current_user_sid().unwrap();
+        let account = user_account_for_sid(&me).unwrap();
+        assert!(account.contains('\\'), "{account}");
+        let lower = me.to_lowercase();
+        assert_eq!(user_account_for_sid(&lower).unwrap(), account);
+        for (sid, what) in [
+            ("S-1-5-18", "well-known"),
+            ("S-1-5-32-544", "group"),
+            ("S-1-1-0", "well-known"),
+        ] {
+            let e = format!("{:#}", user_account_for_sid(sid).unwrap_err());
+            assert!(
+                e.contains(what) && e.contains("not a user account"),
+                "{sid}: {e}"
+            );
+        }
+        let e = format!("{:#}", user_account_for_sid("not-a-sid").unwrap_err());
+        assert!(e.contains("not a valid SID"), "{e}");
+        let e = format!(
+            "{:#}",
+            user_account_for_sid("S-1-5-21-1-2-3-999999").unwrap_err()
+        );
+        assert!(e.contains("no account"), "{e}");
     }
 
     #[test]

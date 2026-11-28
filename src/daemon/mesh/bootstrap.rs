@@ -399,8 +399,8 @@ async fn serve_ipc(
         }
         // WIN-034: the reserve needs the caller before any read; only asked
         // once the general pool is full.
-        let permit =
-            admission.try_admit(|| may_use_reserve(pipe_caller(&connected).as_ref(), || None));
+        let permit = admission
+            .try_admit(|| may_use_reserve(pipe_caller(&connected).as_ref(), Operator::load));
         let Some(permit) = permit else {
             tracing::debug!("IPC client turned away: no free handler slot");
             send_busy_reply_pipe(&connected);
@@ -521,9 +521,7 @@ async fn serve_ipc(
                         // Only read on a full general pool: a privileged caller
                         // needs no lookup, anyone else is compared with the
                         // operator UID.
-                        may_use_reserve(caller.as_ref(), || {
-                            config::load().ok().and_then(|c| c.operator_uid)
-                        })
+                        may_use_reserve(caller.as_ref(), Operator::load)
                     });
                     let Some(permit) = permit else {
                         // No slot: answer without waiting and close.
@@ -705,10 +703,10 @@ impl IpcSlots {
 
 /// IPC-ADMISSION-002: may use the reserved handler slots. The same callers
 /// `check_authorized` lets mutate (WIN-010): privileged, or the configured
-/// operator. An unknown caller never may. `operator_uid` is only called for a
-/// known, unprivileged caller.
-fn may_use_reserve(caller: Option<&Caller>, operator_uid: impl FnOnce() -> Option<u32>) -> bool {
-    caller.is_some_and(|c| c.is_privileged() || c.is_operator(operator_uid()))
+/// operator (a UID on Unix, a SID on Windows, WIN-060). An unknown caller never
+/// may. `operator` is only called for a known, unprivileged caller.
+fn may_use_reserve(caller: Option<&Caller>, operator: impl FnOnce() -> Operator) -> bool {
+    caller.is_some_and(|c| c.is_privileged() || c.is_operator(&operator()))
 }
 
 /// IPC-ADMISSION-002: the pre-encoded reply for a connection turned away because
@@ -897,14 +895,34 @@ mod tests {
     #[test]
     fn reserve_is_for_root_or_the_operator() {
         let unix = |uid| Caller::Unix { uid, gid: 0 };
-        assert!(may_use_reserve(Some(&unix(0)), || None));
-        assert!(may_use_reserve(Some(&unix(1000)), || Some(1000)));
-        assert!(!may_use_reserve(Some(&unix(1001)), || Some(1000)));
-        assert!(!may_use_reserve(Some(&unix(1000)), || None));
+        let none = Operator::default;
+        assert!(may_use_reserve(Some(&unix(0)), none));
+        assert!(may_use_reserve(Some(&unix(1000)), || Operator::uid(1000)));
+        assert!(!may_use_reserve(Some(&unix(1001)), || Operator::uid(1000)));
+        assert!(!may_use_reserve(Some(&unix(1000)), none));
         // Unknown caller never may, even with no operator set.
-        assert!(!may_use_reserve(None, || None));
+        assert!(!may_use_reserve(None, none));
         // Root needs no operator lookup.
         assert!(may_use_reserve(Some(&unix(0)), || panic!("looked up")));
+        // WIN-060: the Windows operator account (by SID) may use it too.
+        let win = |sid: &str, elevated| Caller::Windows {
+            sid: sid.to_string(),
+            is_local_system: false,
+            is_elevated_admin: elevated,
+        };
+        let op = || Operator::sid("S-1-5-21-1-2-3-1001");
+        assert!(may_use_reserve(
+            Some(&win("S-1-5-21-1-2-3-1001", false)),
+            op
+        ));
+        assert!(!may_use_reserve(
+            Some(&win("S-1-5-21-1-2-3-1002", false)),
+            op
+        ));
+        assert!(may_use_reserve(
+            Some(&win("S-1-5-21-1-2-3-1002", true)),
+            || panic!("looked up")
+        ));
     }
 
     #[test]

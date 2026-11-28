@@ -265,6 +265,13 @@ pub enum IpcMessage {
         network: String,
         invite_id: String,
     },
+    /// Windows: authorize a user account (by SID string, `S-1-5-21-...`) to
+    /// control the daemon without an elevated token, the counterpart of
+    /// [`SetOperator`](Self::SetOperator). Privileged-only (WIN-060). Kept
+    /// last so every earlier variant keeps its position.
+    SetOperatorSid {
+        sid: String,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
