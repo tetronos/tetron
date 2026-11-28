@@ -248,6 +248,13 @@ pub(super) fn install_echo_rules(adapter: &str, v4: Ipv4Addr, v6: Ipv6Addr) -> R
 /// Delete every tetron echo rule, of any adapter (WIN-055, uninstall). Matched
 /// by the display names [`rule_names`] creates; PowerShell's rule cmdlets are
 /// used because `netsh`'s listing is localized text.
+/// PowerShell text for [`remove_all_echo_rules`]. Progress output is off: run
+/// without a console of its own, `Remove-NetFirewallRule` deletes the rules,
+/// then fails drawing its progress bar and exits 1 (WIN-087).
+const REMOVE_ALL_ECHO_RULES_PS: &str = "$ProgressPreference = 'SilentlyContinue'; \
+    Get-NetFirewallRule -DisplayName 'tetron tetron-* echo' -ErrorAction SilentlyContinue \
+    | Remove-NetFirewallRule";
+
 pub(super) fn remove_all_echo_rules() -> Result<()> {
     let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
     let ps = std::path::Path::new(&root)
@@ -261,7 +268,23 @@ pub(super) fn remove_all_echo_rules() -> Result<()> {
             "-NoProfile".into(),
             "-NonInteractive".into(),
             "-Command".into(),
-            "Get-NetFirewallRule -DisplayName 'tetron tetron-* echo' -ErrorAction SilentlyContinue | Remove-NetFirewallRule".into(),
+            REMOVE_ALL_ECHO_RULES_PS.into(),
         ],
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // WIN-087: progress output off before the cmdlets run.
+    #[test]
+    fn echo_rule_cleanup_turns_progress_off_first() {
+        let cmd = REMOVE_ALL_ECHO_RULES_PS;
+        let progress = cmd
+            .find("$ProgressPreference = 'SilentlyContinue';")
+            .unwrap();
+        assert!(progress < cmd.find("Get-NetFirewallRule").unwrap());
+        assert!(cmd.ends_with("| Remove-NetFirewallRule"));
+    }
 }

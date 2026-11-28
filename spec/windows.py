@@ -896,3 +896,20 @@ class WindowsInstallOnPath(Requirement):
     Depends on WIN-056, WIN-085.
     """
     req_id = "WIN-086"
+
+
+class WindowsFirewallCleanupNoProgress(Requirement):
+    """REQUIREMENT-ID: WIN-087
+
+    The uninstall firewall cleanup (WIN-055) runs PowerShell with progress
+    output off (`$ProgressPreference = 'SilentlyContinue'` before the
+    cmdlets). tetron starts PowerShell without a console of its own, and
+    `Remove-NetFirewallRule` then fails after deleting the rules, while
+    drawing its progress bar ("Access is denied ... reading the console
+    output buffer", exit 1), so a successful cleanup was reported as a
+    failure (seen on a real Windows 10 machine). The command text is a
+    constant, unit-tested on Windows for the progress setting.
+
+    Depends on WIN-055.
+    """
+    req_id = "WIN-087"
