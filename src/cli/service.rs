@@ -658,6 +658,7 @@ pub(crate) async fn install_and_start_service(
 /// When the service is (re)installed under `sudo`, grant the invoking user
 /// (`$SUDO_USER`) operator access so subsequent `tetron` commands work without
 /// root. Best-effort: silent if there is no `$SUDO_USER` or the daemon refuses.
+#[cfg(unix)]
 pub(crate) async fn grant_operator_to_invoking_user() {
     let Ok(user) = std::env::var("SUDO_USER") else {
         return;
@@ -672,6 +673,34 @@ pub(crate) async fn grant_operator_to_invoking_user() {
         let _ = ipc::send(&mut stream, ipc::IpcMessage::SetOperator { uid }).await;
         if let Ok(ipc::IpcMessage::Ok { .. }) = ipc::recv(&mut stream).await {
             println!("granted operator access to '{user}' — run tetron without sudo");
+        }
+    }
+}
+
+/// WIN-061: the counterpart of granting `$SUDO_USER`. The installing process
+/// runs as the user who elevated (an Administrator's elevated token keeps
+/// their own SID), so that account becomes the operator and can control
+/// tetron from unelevated sessions. Best-effort and silent when the process
+/// is LocalSystem or not a user account, or the daemon refuses.
+#[cfg(windows)]
+pub(crate) async fn grant_operator_to_invoking_user() {
+    use tetron::windows_identity::{LOCAL_SYSTEM_SID, current_user_sid, user_account_for_sid};
+    let Some(sid) = current_user_sid() else {
+        return;
+    };
+    if sid == LOCAL_SYSTEM_SID {
+        return;
+    }
+    let Ok(account) = user_account_for_sid(&sid) else {
+        return;
+    };
+    if let Ok(mut stream) = ipc::connect().await {
+        let _ = ipc::send(&mut stream, ipc::IpcMessage::SetOperatorSid { sid }).await;
+        if let Ok(ipc::IpcMessage::Ok { .. }) = ipc::recv(&mut stream).await {
+            println!(
+                "granted operator access to {account}: it can run tetron without an elevated \
+                 terminal (change with: tetron set-operator <account>, elevated)"
+            );
         }
     }
 }
