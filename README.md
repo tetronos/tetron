@@ -218,7 +218,7 @@ Run `tetron --help` (and `tetron <command> --help`) for the full surface: `creat
 
 ## Permissions
 
-Like Tailscale, the daemon authorizes each command by the **caller's UID**, not file permissions. Read-only commands (`status`, `... show`) are open to any local user; mutating commands need root or the configured operator. The user who installs the service (`sudo tetron install`) becomes the operator automatically.
+Like Tailscale, the daemon authorizes each command by the **caller's UID**, not file permissions. Read-only commands (`status`, `... show`) are open to any local user; mutating commands need root or the configured operator. The user who installs the service (`sudo tetron install`) becomes the operator automatically. On Windows the operator is a user account (by SID): the user who runs `tetron install` becomes the operator, and `tetron set-operator <account>` from an elevated terminal changes it.
 
 ```bash
 sudo tetron install | restart | uninstall   # manage the system service
