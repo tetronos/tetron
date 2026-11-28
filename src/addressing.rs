@@ -321,6 +321,9 @@ mod tests {
         let other = ("10.99.0.0".parse::<std::net::Ipv4Addr>().unwrap(), 16u8);
         assert!(subnet_change_warning(live, live).is_none());
         let w = subnet_change_warning(other, live).expect("mismatch must warn");
+        // `sudo tetron restart` on Unix, the elevated-terminal form on Windows.
+        assert!(w.contains(&crate::admin_command("restart")), "{w}");
+        #[cfg(unix)]
         assert!(w.contains("sudo tetron restart"), "{w}");
     }
 
