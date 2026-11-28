@@ -263,9 +263,9 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: Option<ConfigAction>,
     },
-    /// Authorize a user to run tetron without sudo (requires root)
+    /// Authorize a user to run tetron without sudo (requires root; on Windows an elevated terminal)
     SetOperator {
-        /// Username or numeric UID to grant operator access
+        /// Username or numeric UID to grant operator access (Windows: user, DOMAIN\user or SID)
         user: String,
     },
     /// Print the tetron version
@@ -870,25 +870,30 @@ pub(crate) fn uid_for_user(user: &str) -> Option<u32> {
     tetron::userdb::user_uid(user).or_else(|| user.parse::<u32>().ok())
 }
 
-/// WIN-001: Windows has no UIDs; operator accounts are not supported there yet.
-#[cfg(windows)]
-pub(crate) fn uid_for_user(_user: &str) -> Option<u32> {
-    None
-}
-
 /// `tetron set-operator <user>`: authorize a local user to run mutating tetron
 /// commands without sudo (Tailscale's `--operator` model). The daemon enforces
 /// that this call itself comes from root.
 async fn cmd_set_operator(user: &str) -> Result<()> {
-    if cfg!(windows) {
-        anyhow::bail!("set-operator is not yet supported on Windows (user '{user}')");
-    }
-    let uid = uid_for_user(user)
-        .ok_or_else(|| anyhow::anyhow!("unknown user '{user}' (pass a valid username or UID)"))?;
-    let mut stream = ipc::connect()
-        .await
-        .context("tetron daemon is not running; start it with: sudo tetron install")?;
-    ipc::send(&mut stream, ipc::IpcMessage::SetOperator { uid }).await?;
+    // WIN-062: Windows names the operator by account, sent as its SID.
+    #[cfg(windows)]
+    let request = {
+        let (sid, _) = tetron::windows_identity::resolve_user_account(user)?;
+        ipc::IpcMessage::SetOperatorSid { sid }
+    };
+    #[cfg(not(windows))]
+    let request = {
+        let uid = uid_for_user(user).ok_or_else(|| {
+            anyhow::anyhow!("unknown user '{user}' (pass a valid username or UID)")
+        })?;
+        ipc::IpcMessage::SetOperator { uid }
+    };
+    let mut stream = ipc::connect().await.with_context(|| {
+        format!(
+            "tetron daemon is not running; start it with: {}",
+            tetron::admin_command("install")
+        )
+    })?;
+    ipc::send(&mut stream, request).await?;
     match ipc::recv(&mut stream).await? {
         ipc::IpcMessage::Ok { message } => println!("{message}"),
         ipc::IpcMessage::Error { message } => {

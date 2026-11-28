@@ -13,8 +13,8 @@ use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, LocalFre
 use windows_sys::Win32::Security::Authorization::{ConvertSidToStringSidW, ConvertStringSidToSidW};
 use windows_sys::Win32::Security::{
     CheckTokenMembership, CreateWellKnownSid, DuplicateToken, GetTokenInformation,
-    LookupAccountSidW, PSID, RevertToSelf, SecurityIdentification, TOKEN_DUPLICATE, TOKEN_QUERY,
-    TOKEN_USER, TokenUser, WinBuiltinAdministratorsSid,
+    LookupAccountNameW, LookupAccountSidW, PSID, RevertToSelf, SecurityIdentification,
+    TOKEN_DUPLICATE, TOKEN_QUERY, TOKEN_USER, TokenUser, WinBuiltinAdministratorsSid,
 };
 use windows_sys::Win32::System::Pipes::ImpersonateNamedPipeClient;
 use windows_sys::Win32::System::Threading::{
@@ -322,6 +322,66 @@ pub fn user_account_for_sid(sid: &str) -> Result<String> {
     Ok(account)
 }
 
+/// WIN-062: resolve `account` (`user`, `DOMAIN\user`, `user@domain`, or a
+/// SID string) to `(sid, DOMAIN\name)`, refusing anything that is not a
+/// user account.
+pub fn resolve_user_account(account: &str) -> Result<(String, String)> {
+    if account.len() > 4 && account[..4].eq_ignore_ascii_case("S-1-") {
+        let name = user_account_for_sid(account)?;
+        return Ok((account.to_string(), name));
+    }
+    let text = wide(account);
+    let (mut sid_len, mut domain_len, mut kind) = (0u32, 0u32, 0i32);
+    // SAFETY: a size query with null buffers; it fails by design and writes
+    // the required lengths.
+    unsafe {
+        LookupAccountNameW(
+            std::ptr::null(),
+            text.as_ptr(),
+            std::ptr::null_mut(),
+            &mut sid_len,
+            std::ptr::null_mut(),
+            &mut domain_len,
+            &mut kind,
+        );
+    }
+    if sid_len == 0 {
+        // SAFETY: reads this thread's last error.
+        let code = unsafe { GetLastError() };
+        anyhow::bail!("no account named '{account}' (Win32 error {code})");
+    }
+    // u64 words keep the buffer aligned for a SID.
+    let mut sid = vec![0u64; (sid_len as usize).div_ceil(8)];
+    let mut domain = vec![0u16; domain_len.max(1) as usize];
+    // SAFETY: the buffers hold the sizes the size query reported.
+    let ok = unsafe {
+        LookupAccountNameW(
+            std::ptr::null(),
+            text.as_ptr(),
+            sid.as_mut_ptr().cast(),
+            &mut sid_len,
+            domain.as_mut_ptr(),
+            &mut domain_len,
+            &mut kind,
+        )
+    };
+    if ok == 0 {
+        // SAFETY: reads this thread's last error.
+        let code = unsafe { GetLastError() };
+        anyhow::bail!("looking up '{account}' failed (Win32 error {code})");
+    }
+    let sid_text =
+        sid_to_string(sid.as_mut_ptr().cast()).context("rendering the account SID failed")?;
+    let (name, _) = lookup_sid(sid.as_mut_ptr().cast())?;
+    if kind != SID_TYPE_USER {
+        anyhow::bail!(
+            "{name} ({sid_text}) is {}, not a user account; the operator must be one user",
+            sid_type_name(kind)
+        );
+    }
+    Ok((sid_text, name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -381,6 +441,29 @@ mod tests {
             user_account_for_sid("S-1-5-21-1-2-3-999999").unwrap_err()
         );
         assert!(e.contains("no account"), "{e}");
+    }
+
+    // WIN-062: an account name, DOMAIN\name and a SID resolve to the same
+    // user; a group or unknown name is refused.
+    #[test]
+    fn resolve_user_account_by_name_or_sid() {
+        let me = current_user_sid().unwrap();
+        let full = user_account_for_sid(&me).unwrap();
+        let short = full.rsplit('\\').next().unwrap().to_string();
+        for input in [full.as_str(), short.as_str(), me.as_str()] {
+            let (sid, name) = resolve_user_account(input).unwrap();
+            assert!(sid.eq_ignore_ascii_case(&me), "{input}: {sid}");
+            assert_eq!(name, full, "{input}");
+        }
+        let e = format!("{:#}", resolve_user_account("Administrators").unwrap_err());
+        assert!(e.contains("not a user account"), "{e}");
+        let e = format!("{:#}", resolve_user_account("SYSTEM").unwrap_err());
+        assert!(e.contains("not a user account"), "{e}");
+        let e = format!(
+            "{:#}",
+            resolve_user_account("no-such-user-tetron").unwrap_err()
+        );
+        assert!(e.contains("no account named"), "{e}");
     }
 
     #[test]
