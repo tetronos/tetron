@@ -15,10 +15,10 @@
 #   3. Runs `tetron-x86_64-windows.exe install` from a new temporary folder.
 #      That copies itself to %ProgramFiles%\tetron\tetron.exe, writes
 #      wintun.dll beside it, registers and starts the `tetron` Windows
-#      service (LocalSystem, automatic start), and activates the VPN.
-#   4. Adds %ProgramFiles%\tetron to the machine PATH if it is not there yet,
-#      so `tetron` works in new terminals.
-#   5. Deletes the temporary folder.
+#      service (LocalSystem, automatic start), puts %ProgramFiles%\tetron on
+#      the machine PATH so `tetron` works in new terminals, and activates the
+#      VPN.
+#   4. Deletes the temporary folder.
 #
 # Nothing else on the system is changed. `tetron uninstall` removes the
 # service and the program files and keeps %ProgramData%\tetron (the node's
@@ -76,18 +76,9 @@ try {
     & $exe install
     if ($LASTEXITCODE -ne 0) { throw "tetron install failed (exit code $LASTEXITCODE)" }
 
-    # 4. Put the install folder on the machine PATH for new terminals.
-    $installDir = Join-Path $env:ProgramFiles "tetron"
-    $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
-    $entries = $machinePath -split ";" | Where-Object { $_ -ne "" }
-    if ($entries -notcontains $installDir) {
-        [Environment]::SetEnvironmentVariable("Path", (($entries + $installDir) -join ";"), "Machine")
-        Write-Host "added $installDir to the machine PATH (open a new terminal to use it)"
-    }
-
     Write-Host "tetron is installed. Next: tetron create, or tetron join <invite key>."
 }
 finally {
-    # 5. Clean up the download.
+    # 4. Clean up the download.
     Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
 }

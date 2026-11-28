@@ -490,6 +490,40 @@ pub(crate) fn ensure_service_installed(overrides: &PathOverrides) -> Result<()> 
 /// networks. Unlike the old `up`, this never silently installs or starts the
 /// system service -- if no daemon is reachable, it errors the same way
 /// regardless of caller privilege and points at the actual bootstrap command.
+/// One `PATH` entry compared the way Windows treats it: case-insensitive, a
+/// trailing backslash ignored (WIN-086).
+#[cfg(any(windows, test))]
+fn same_path_entry(a: &str, b: &str) -> bool {
+    a.trim()
+        .trim_end_matches('\\')
+        .eq_ignore_ascii_case(b.trim().trim_end_matches('\\'))
+}
+
+/// `current` (a `;`-separated `PATH` value, raw) with `dir` appended, or
+/// `None` when it is already there. Other entries are kept byte for byte.
+#[cfg(any(windows, test))]
+pub(crate) fn path_list_with(current: &str, dir: &str) -> Option<String> {
+    if current.split(';').any(|e| same_path_entry(e, dir)) {
+        return None;
+    }
+    let base = current.trim_end_matches(';');
+    Some(if base.is_empty() {
+        dir.to_string()
+    } else {
+        format!("{base};{dir}")
+    })
+}
+
+/// `current` without any entry equal to `dir`, or `None` when there was none.
+#[cfg(any(windows, test))]
+pub(crate) fn path_list_without(current: &str, dir: &str) -> Option<String> {
+    let kept: Vec<&str> = current
+        .split(';')
+        .filter(|e| !same_path_entry(e, dir))
+        .collect();
+    (kept.len() != current.split(';').count()).then(|| kept.join(";"))
+}
+
 /// How to install the service, in the platform's own words.
 #[cfg(unix)]
 const INSTALL_HINT: &str = "sudo tetron install";
@@ -1081,6 +1115,28 @@ pub(crate) fn cmd_uninstall_service() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_list_helpers_keep_other_entries_exactly() {
+        // WIN-086
+        let raw = r"%SystemRoot%\system32;%SystemRoot%;C:\Tools\";
+        let dir = r"C:\Program Files\tetron";
+        let added = path_list_with(raw, dir).unwrap();
+        assert_eq!(added, format!("{raw};{dir}"));
+        // Already present, in another case or with a trailing backslash.
+        assert_eq!(path_list_with(&added, r"c:\program files\TETRON\"), None);
+        assert_eq!(
+            path_list_with(&format!("{raw};"), dir).unwrap(),
+            format!("{raw};{dir}")
+        );
+        assert_eq!(path_list_with("", dir).unwrap(), dir);
+        assert_eq!(path_list_without(&added, dir).unwrap(), raw);
+        assert_eq!(path_list_without(raw, dir), None);
+        assert_eq!(
+            path_list_without(&format!("{dir};{raw}"), &format!("{dir}\\")).unwrap(),
+            raw
+        );
+    }
 
     #[test]
     fn test_full_version_non_empty() {

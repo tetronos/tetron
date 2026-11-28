@@ -867,3 +867,32 @@ class WindowsSelfInstallingExe(Requirement):
     Depends on WIN-056, WIN-080, WIN-081, WIN-082.
     """
     req_id = "WIN-085"
+
+
+class WindowsInstallOnPath(Requirement):
+    """REQUIREMENT-ID: WIN-086
+
+    `tetron install` puts `%ProgramFiles%\\tetron` on the machine `PATH`, so
+    `tetron` works in any new terminal after any install path (double-click,
+    terminal, `install.ps1`); `tetron uninstall` removes that entry.
+
+    - The value is edited in the registry
+      (`HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment`,
+      `Path`) as raw text: its type (normally `REG_EXPAND_SZ`) and every
+      unexpanded entry such as `%SystemRoot%\\system32` are kept exactly.
+      .NET's `[Environment]::SetEnvironmentVariable(..., "Machine")` is not
+      used: it reads the value expanded and writes it back as `REG_SZ`, which
+      silently turns every `%...%` entry into a fixed path (seen on a real
+      Windows 10 machine).
+    - The entry is added only when absent (case-insensitive, trailing
+      backslash ignored) and removed exactly, other entries untouched; pure
+      list helpers are unit-tested everywhere.
+    - Running programs are told the environment changed
+      (`WM_SETTINGCHANGE` "Environment", bounded wait), so new terminals
+      opened from Explorer see it; terminals already open keep their PATH.
+    - `install.ps1` no longer edits PATH itself.
+    - Failure to update PATH is a warning, never a failed install.
+
+    Depends on WIN-056, WIN-085.
+    """
+    req_id = "WIN-086"

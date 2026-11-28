@@ -194,6 +194,157 @@ fn install_files() -> Result<PathBuf> {
 }
 
 // ---------------------------------------------------------------------------
+// WIN-086: the install directory on the machine PATH
+// ---------------------------------------------------------------------------
+
+const ENVIRONMENT_KEY: &str = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
+
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(Some(0)).collect()
+}
+
+/// An open registry key, closed on drop.
+struct RegKey(windows_sys::Win32::System::Registry::HKEY);
+
+impl Drop for RegKey {
+    fn drop(&mut self) {
+        // SAFETY: a key this guard opened and owns.
+        unsafe { windows_sys::Win32::System::Registry::RegCloseKey(self.0) };
+    }
+}
+
+fn open_environment_key() -> Result<RegKey> {
+    use windows_sys::Win32::System::Registry::{
+        HKEY_LOCAL_MACHINE, KEY_QUERY_VALUE, KEY_SET_VALUE, RegOpenKeyExW,
+    };
+    let mut key = std::ptr::null_mut();
+    // SAFETY: the subkey name is NUL-terminated; `key` is an out-pointer.
+    let status = unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            wide(ENVIRONMENT_KEY).as_ptr(),
+            0,
+            KEY_QUERY_VALUE | KEY_SET_VALUE,
+            &mut key,
+        )
+    };
+    anyhow::ensure!(
+        status == 0,
+        "opening the machine environment key failed (Win32 error {status})"
+    );
+    Ok(RegKey(key))
+}
+
+/// The machine `Path` value as stored (unexpanded) and its registry type.
+fn read_machine_path(key: &RegKey) -> Result<(String, u32)> {
+    use windows_sys::Win32::System::Registry::RegQueryValueExW;
+    let name = wide("Path");
+    let (mut kind, mut bytes) = (0u32, 0u32);
+    // SAFETY: size query with a null buffer.
+    let status = unsafe {
+        RegQueryValueExW(
+            key.0,
+            name.as_ptr(),
+            std::ptr::null(),
+            &mut kind,
+            std::ptr::null_mut(),
+            &mut bytes,
+        )
+    };
+    anyhow::ensure!(
+        status == 0,
+        "reading the machine Path failed (Win32 error {status})"
+    );
+    let mut buf = vec![0u16; (bytes as usize).div_ceil(2)];
+    // SAFETY: `buf` holds at least `bytes` writable bytes.
+    let status = unsafe {
+        RegQueryValueExW(
+            key.0,
+            name.as_ptr(),
+            std::ptr::null(),
+            &mut kind,
+            buf.as_mut_ptr().cast(),
+            &mut bytes,
+        )
+    };
+    anyhow::ensure!(
+        status == 0,
+        "reading the machine Path failed (Win32 error {status})"
+    );
+    let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    Ok((String::from_utf16_lossy(&buf[..end]), kind))
+}
+
+/// Write the machine `Path` back with the same registry type, then tell
+/// running programs the environment changed (bounded wait).
+fn write_machine_path(key: &RegKey, value: &str, kind: u32) -> Result<()> {
+    use windows_sys::Win32::System::Registry::RegSetValueExW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        HWND_BROADCAST, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_SETTINGCHANGE,
+    };
+    let data = wide(value);
+    // SAFETY: `data` is NUL-terminated UTF-16; the length includes the NUL.
+    let status = unsafe {
+        RegSetValueExW(
+            key.0,
+            wide("Path").as_ptr(),
+            0,
+            kind,
+            data.as_ptr().cast(),
+            (data.len() * 2) as u32,
+        )
+    };
+    anyhow::ensure!(
+        status == 0,
+        "writing the machine Path failed (Win32 error {status})"
+    );
+    let env = wide("Environment");
+    let mut result = 0usize;
+    // SAFETY: a broadcast with a NUL-terminated string parameter; the
+    // timeout bounds the wait on programs that do not respond.
+    unsafe {
+        SendMessageTimeoutW(
+            HWND_BROADCAST,
+            WM_SETTINGCHANGE,
+            0,
+            env.as_ptr() as isize,
+            SMTO_ABORTIFHUNG,
+            5000,
+            &mut result,
+        )
+    };
+    Ok(())
+}
+
+/// Put the install directory on the machine PATH (WIN-086).
+fn add_install_dir_to_path() -> Result<()> {
+    let key = open_environment_key()?;
+    let (current, kind) = read_machine_path(&key)?;
+    let dir = install_dir();
+    if let Some(updated) = super::service::path_list_with(&current, &dir.to_string_lossy()) {
+        write_machine_path(&key, &updated, kind)?;
+        println!(
+            "added {} to the machine PATH (open a new terminal to use `tetron`)",
+            dir.display()
+        );
+    }
+    Ok(())
+}
+
+/// Take the install directory off the machine PATH (WIN-086).
+fn remove_install_dir_from_path() -> Result<()> {
+    let key = open_environment_key()?;
+    let (current, kind) = read_machine_path(&key)?;
+    if let Some(updated) =
+        super::service::path_list_without(&current, &install_dir().to_string_lossy())
+    {
+        write_machine_path(&key, &updated, kind)?;
+        println!("removed {} from the machine PATH", install_dir().display());
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // WIN-085: double-click install
 // ---------------------------------------------------------------------------
 
@@ -382,6 +533,9 @@ pub(crate) fn install_and_start() -> Result<()> {
         stop_and_wait(s)?;
     }
     let exe = install_files()?;
+    if let Err(e) = add_install_dir_to_path() {
+        eprintln!("warning: could not add tetron to the machine PATH: {e:#}");
+    }
     let service = match existing {
         Some(s) => {
             s.change_config(&info(&exe))
@@ -454,6 +608,9 @@ pub(crate) fn uninstall() -> Result<()> {
     }
     if let Err(e) = tetron::tun::remove_all_echo_rules() {
         eprintln!("warning: could not remove tetron firewall rules: {e:#}");
+    }
+    if let Err(e) = remove_install_dir_from_path() {
+        eprintln!("warning: could not remove tetron from the machine PATH: {e:#}");
     }
 
     let dir = install_dir();
