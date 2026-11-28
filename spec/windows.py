@@ -913,3 +913,68 @@ class WindowsFirewallCleanupNoProgress(Requirement):
     Depends on WIN-055.
     """
     req_id = "WIN-087"
+
+
+class WindowsOperatorAuthorization(Requirement):
+    """REQUIREMENT-ID: WIN-060
+
+    Windows has an operator account, the counterpart of the Unix operator UID
+    (AUTHZ-001): one local or domain user, identified by SID, that may send
+    every mutating request except granting operator access, without an
+    elevated token. This is what lets the tray and web UI addons, which run as
+    the signed-in user, control tetron on Windows.
+
+    - The SID is stored as `operator_sid` in `settings.toml` (protected tree,
+      WIN-020..022), beside `operator_uid`; each platform reads only its own.
+    - `Caller::is_operator` matches a Windows caller whose token user SID
+      equals `operator_sid` (case-insensitive string compare); a Unix caller
+      still matches `operator_uid`. The IPC admission reserve
+      (IPC-ADMISSION-002) uses the same rule on both platforms.
+    - A new IPC request `SetOperatorSid { sid }`, appended to `IpcMessage`
+      (additive; an older daemon answers it with the undecodable-request
+      error, PROTO-WIRE-001), is privileged-only like `SetOperator`. A
+      Windows daemon accepts it only for a SID that resolves to a user account
+      (`SidTypeUser`): groups, aliases and well-known principals such as
+      LocalSystem are refused. A Unix daemon refuses it, and a Windows daemon
+      refuses `SetOperator { uid }`, each naming the right form.
+    - Permission-denied messages name the elevation step for the platform
+      (`tetron::admin_command`), never `sudo` on Windows.
+
+    Depends on WIN-010, WIN-033.
+    """
+    req_id = "WIN-060"
+
+
+class WindowsSetOperatorCommand(Requirement):
+    """REQUIREMENT-ID: WIN-062
+
+    `tetron set-operator <account>` works on Windows from an elevated
+    terminal. `<account>` is `user`, `DOMAIN\\user`, `user@domain`, or a SID
+    string (`S-1-5-21-...`); it is resolved with `LookupAccountNameW` (or
+    checked with `LookupAccountSidW` for a SID) and must be a user account,
+    else the command fails naming what the account is. The resolved SID is
+    sent as `SetOperatorSid` and the daemon checks it again (WIN-060).
+
+    Depends on WIN-060.
+    """
+    req_id = "WIN-062"
+
+
+class WindowsInstallGrantsOperator(Requirement):
+    """REQUIREMENT-ID: WIN-061
+
+    `tetron install` on Windows makes the installing user the operator, the
+    counterpart of granting `$SUDO_USER` on Unix: after the daemon is up, the
+    user SID of the installing process is sent as `SetOperatorSid` and the
+    granted account is printed. An Administrator who installs from an elevated
+    terminal (or by double-click and UAC) is then the operator in their normal,
+    unelevated sessions. Skipped silently when the process runs as LocalSystem
+    or its SID is not a user account (a deployment tool), and best-effort like
+    the Unix grant: a refusal never fails the install. When a standard user
+    installs with another account's credentials at the UAC prompt, the process
+    runs as that other account, so that account is granted; the printed name
+    shows it, and `tetron set-operator` changes it.
+
+    Depends on WIN-060, WIN-062, WIN-056.
+    """
+    req_id = "WIN-061"
