@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.15.9] - 2026-11-28
+
 ### Added
 
 - Windows operator account: `tetron set-operator <account>` (from an elevated terminal) lets one Windows user control tetron from an ordinary terminal, without a UAC prompt. `tetron install` grants this to the user who installs it, as `sudo tetron install` does on Linux. Groups and built-in accounts such as SYSTEM are refused.
